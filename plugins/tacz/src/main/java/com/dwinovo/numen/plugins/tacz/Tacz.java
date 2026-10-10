@@ -7,7 +7,9 @@ import com.tacz.guns.api.item.GunTabType;
 import com.tacz.guns.api.item.IGun;
 import com.tacz.guns.entity.shooter.ShooterDataHolder;
 import com.tacz.guns.resource.index.CommonGunIndex;
+import net.minecraft.commands.arguments.EntityAnchorArgument;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Inventory;
@@ -33,20 +35,17 @@ import java.util.Set;
  * {@code LivingEntityMixin}),同伴是服务端假玩家({@code ServerPlayer} 是 {@code LivingEntity} 的子类),
  * 所以 {@code IGunOperator.fromLivingEntity(companion)} 直接可用。
  *
- * <h2>打法的出处:车万女仆验证过的枪械逻辑</h2>
- * 车万女仆(TouhouLittleMaid)官方内置了 TACZ 兼容,它的 {@code TacInnerCompat.performGunAttack}
- * 是<b>在真实游戏里验证过能打中</b>的完整状态机:瞄准角公式、狙击枪开镜、拉栓、换弹、
- * NOT_DRAW 时切枪。本插件的瞄准与准备流程照它逐条对齐——女仆怎么做,同伴就怎么做,
- * 只有"目标"和"身体"换成同伴自己。
+ * <h2>打法的出处:车万女仆验证过的枪械逻辑 + Numen 自己的弓战斗</h2>
+ * 车万女仆(TouhouLittleMaid)的 {@code TacInnerCompat.performGunAttack} 是 TACZ 上验证过能打中的
+ * 完整状态机:瞄准角公式、狙击枪开镜、拉栓、换弹、NOT_DRAW 时切枪。Numen 自己的弓战斗
+ * ({@code AttackCompanionTask} / {@code RangedShot} / {@code InputDriver})则是"怎么瞄、怎么不
+ * 乱跑"的验证:瞄准用原版 {@code lookAt(EYES)} 一次把偏航、俯仰、头朝向全对齐,开枪前站定
+ * ({@code setSprinting(false)})。本插件两条都照搬:女仆的状态机 + Numen 的朝向。
  *
  * <h2>为什么用 {@code shoot(pitch, yaw)} 而不是带时间戳的那个</h2>
  * 带时间戳的重载要过一个 {@code SERVER_SHOOT_NETWORK_V} 的网络时钟校验,那个是给真客户端抗延迟用的;
  * 不带时间戳的重载在 TACZ 的 mixin 里自己填 {@code now - baseTimestamp},正好落在校验窗口内,同伴(没有
  * 客户端)才开得出这一枪。女仆走的是同一条无时间戳路径。
- *
- * <h2>身体朝向要跟着弹道走</h2>
- * 子弹的方向由传给 shoot 的俯仰/偏航决定,但玩家看到的是身体(头)的朝向。开枪前把身体与头转向
- * 目标({@link #face}),弹道和看得见的朝向才一致;否则"枪口朝前、子弹朝旁边"。
  */
 public final class Tacz {
 
@@ -159,19 +158,17 @@ public final class Tacz {
     }
 
     /**
-     * 把身体与头转向目标——弹道按 {@link #shoot} 的公式算,身体必须朝同一方向,玩家看到的
-     * 枪口朝向才和子弹一致。
+     * 把身体、头、视线全部转向目标——和 Numen 自己的 {@code InputDriver.lookAt} 同一个原版口子:
+     * {@code lookAt(EYES)} 一次对齐偏航、俯仰、头朝向,再补上身体偏航。这样客户端渲染的枪口
+     * 朝向和子弹方向一致,不会"人朝 A 枪打 B"。
      */
     public static void face(LivingEntity shooter, LivingEntity target) {
-        double x = target.getX() - shooter.getX();
-        double y = target.getEyeY() - shooter.getEyeY();
-        double z = target.getZ() - shooter.getZ();
-        float yaw = (float) -Math.toDegrees(Math.atan2(x, z));
-        float pitch = (float) -Math.toDegrees(Math.atan2(y, Math.sqrt(x * x + z * z)));
-        shooter.setYRot(yaw);
-        shooter.setYBodyRot(yaw);
-        shooter.setYHeadRot(yaw);
-        shooter.setXRot(pitch);
+        if (shooter instanceof ServerPlayer p) {
+            p.lookAt(EntityAnchorArgument.Anchor.EYES, target.getEyePosition());
+            p.setYBodyRot(p.getYRot());
+            p.yRotO = p.getYRot();
+            p.xRotO = p.getXRot();
+        }
     }
 
     /** 朝目标的视线方向开一枪。瞄准角照车万女仆验证过的公式,一字不改。 */
