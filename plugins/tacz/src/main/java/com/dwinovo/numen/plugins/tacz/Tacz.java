@@ -43,6 +43,10 @@ import java.util.Set;
  * 带时间戳的重载要过一个 {@code SERVER_SHOOT_NETWORK_V} 的网络时钟校验,那个是给真客户端抗延迟用的;
  * 不带时间戳的重载在 TACZ 的 mixin 里自己填 {@code now - baseTimestamp},正好落在校验窗口内,同伴(没有
  * 客户端)才开得出这一枪。女仆走的是同一条无时间戳路径。
+ *
+ * <h2>身体朝向要跟着弹道走</h2>
+ * 子弹的方向由传给 shoot 的俯仰/偏航决定,但玩家看到的是身体(头)的朝向。开枪前把身体与头转向
+ * 目标({@link #face}),弹道和看得见的朝向才一致;否则"枪口朝前、子弹朝旁边"。
  */
 public final class Tacz {
 
@@ -110,6 +114,18 @@ public final class Tacz {
         return gun != null && gun.getGunId(player.getMainHandItem()).toString().equals(gunId);
     }
 
+    /** 一个玩家背包里的枪,按枪 id 数数(主手、背包、副手都算)。 */
+    public static Map<String, Integer> carriedGuns(Player player) {
+        Map<String, Integer> out = new java.util.LinkedHashMap<>();
+        for (ItemStack stack : player.getInventory().items) {
+            IGun gun = IGun.getIGunOrNull(stack);
+            if (gun != null) {
+                out.merge(gun.getGunId(stack).toString(), 1, Integer::sum);
+            }
+        }
+        return out;
+    }
+
     /**
      * 把背包里那把枪拿到主手,并初始化 TACZ 的射击状态。调用方保证能从背包里找到这把枪。
      * 找得到才来:找不到会静默不动作,所以调用方要先问 {@link #findGunSlot}。
@@ -142,6 +158,22 @@ public final class Tacz {
         IGunOperator.fromLivingEntity(shooter).bolt();
     }
 
+    /**
+     * 把身体与头转向目标——弹道按 {@link #shoot} 的公式算,身体必须朝同一方向,玩家看到的
+     * 枪口朝向才和子弹一致。
+     */
+    public static void face(LivingEntity shooter, LivingEntity target) {
+        double x = target.getX() - shooter.getX();
+        double y = target.getEyeY() - shooter.getEyeY();
+        double z = target.getZ() - shooter.getZ();
+        float yaw = (float) -Math.toDegrees(Math.atan2(x, z));
+        float pitch = (float) -Math.toDegrees(Math.atan2(y, Math.sqrt(x * x + z * z)));
+        shooter.setYRot(yaw);
+        shooter.setYBodyRot(yaw);
+        shooter.setYHeadRot(yaw);
+        shooter.setXRot(pitch);
+    }
+
     /** 朝目标的视线方向开一枪。瞄准角照车万女仆验证过的公式,一字不改。 */
     public static ShootResult shoot(LivingEntity shooter, LivingEntity target) {
         IGunOperator op = IGunOperator.fromLivingEntity(shooter);
@@ -156,6 +188,9 @@ public final class Tacz {
 
     /** 朝面朝方向开一枪(无目标:测试开火、盲射用),子弹沿实体当前视线飞。 */
     public static ShootResult fire(LivingEntity shooter) {
+        // 视线以 yRot/xRot 为准;把身体与头对齐到视线,弹道才和看得见的朝向一致
+        shooter.setYBodyRot(shooter.getYRot());
+        shooter.setYHeadRot(shooter.getYRot());
         IGunOperator op = IGunOperator.fromLivingEntity(shooter);
         return op.shoot(shooter::getXRot, shooter::getYRot);
     }
