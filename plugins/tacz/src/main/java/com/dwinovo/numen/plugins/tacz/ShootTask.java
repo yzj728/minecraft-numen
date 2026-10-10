@@ -14,16 +14,14 @@ import net.minecraft.world.item.ItemStack;
 /**
  * 打出一发:任务每刻把枪的状态机摆对,直到子弹真的出膛,或实在开不了枪。
  *
- * <h2>为什么把循环放进任务而不是让模型自己拉栓换弹</h2>
- * 枪是一个状态机,前置条件不满足时 TACZ 一枪不开、只回一个结果码:手动枪要拉栓({@code NEED_BOLT})、
- * 换弹/拉栓中({@code IS_RELOADING}/{@code IS_BOLTING})、疾跑中({@code IS_SPRINTING})、冷却中
- * ({@code COOL_DOWN})、没子弹({@code NO_AMMO})。这些都要跨好几个游戏刻才能摆平,而模型一次调用
- * 只有程序执行那一下,等不了刻。任务在服务器刻里跑,看见状态没摆对就等下一刻,摆对就扣扳机——
- * "优先开火,不行就自己把枪准备好再打"整条路都替模型走完,模型只拿到最终结果。
+ * <h2>这套状态机从哪来</h2>
+ * 车万女仆的 {@code TacInnerCompat.performGunAttack} 是 TACZ 上验证过能打中的完整打法:
+ * 瞄准角直指目标、狙击枪先开镜、手动枪膛空拉栓({@code NEED_BOLT})、没子弹换弹({@code NO_AMMO})、
+ * 没切枪就切({@code NOT_DRAW})、每步按枪械数据的耗时等足再打。这里逐条照做,只把女仆的
+ * "每 N tick 再调一次"换成任务等刻度——同一套逻辑,同一个节拍。
  *
- * <p>客户端的自动换弹/自动拉栓对同伴无效(它是没有客户端的服务端假玩家),所以这里补上
- * 服务端的等价物:膛空就拉栓,弹匣空就换弹。自动枪不需要拉栓,{@code NEED_BOLT} 不会出现,
- * 这条循环对它们就是"等冷却然后开枪"。
+ * <p>客户端的自动换弹/自动拉栓/自动开镜对同伴无效(它是没有客户端的服务端假玩家),
+ * 所以这几种事都由这个任务在服务端替它做。
  */
 final class ShootTask implements Task {
 
@@ -32,6 +30,8 @@ final class ShootTask implements Task {
     private String outcome = "";
     /** 已经试过换弹。再弹 NO_AMMO 就是包里真的没有对应弹药,判死,别在换弹和空射之间死循环。 */
     private boolean reloadTried;
+    /** 上一拍安排的等待(开镜、拉栓的耗时):到这个游戏刻之前什么也不做。 */
+    private long waitUntil = -1;
     /** 最后一次射击的结果码(失败时带回去)。 */
     private String lastResult;
 
@@ -52,12 +52,17 @@ final class ShootTask implements Task {
             outcome = "no TACZ gun in your main hand; tacz.gun.equip first";
             return TaskState.FAILED;
         }
+        long now = her.serverLevel().getGameTime();
+        // 开镜/拉栓的耗时还没走完:等着
+        if (now < waitUntil) {
+            return TaskState.RUNNING;
+        }
         Tacz.Held held = Tacz.held(her, stack);
-        // 枪还在准备自己:换弹中、拉栓中、冷却中,都等下一刻再试
+        // 枪自己还在忙:换弹、拉栓、冷却,都由它自己的 tick 推进,这里只等
         if (held.reloading() || held.bolting() || held.coolDownMs() > 0) {
             return TaskState.RUNNING;
         }
-        // 疾跑中开不了枪:站定,下一刻再试
+        // 疾跑中开不了枪(女仆 AI 不会疾跑,同伴寻路会):站定,下一刻再试
         if (held.sprinting()) {
             her.setSprinting(false);
             return TaskState.RUNNING;
@@ -66,12 +71,20 @@ final class ShootTask implements Task {
         lastResult = shot.name().toLowerCase(java.util.Locale.ROOT);
         switch (shot) {
             case SUCCESS -> {
+                // 女仆的打法:狙击枪必须开镜再打——不开镜散布大,基本打不中。这一发已经出膛
+                // 就算完成,开镜留给下一次(保持开镜状态,狙击枪连打就一直是准的)。
+                if (Tacz.isSniper(stack) && !Tacz.isAiming(her)) {
+                    Tacz.aim(her, true);
+                    waitUntil = now + Tacz.waitTicks(Tacz.aimTimeSeconds(stack));
+                    return TaskState.RUNNING;
+                }
                 outcome = "fired at " + living.getName().getString();
                 return TaskState.SUCCESS;
             }
             case NEED_BOLT -> {
-                // 手动枪膛空、弹匣有弹:拉栓顶上膛,下一刻再打
+                // 手动枪膛空、弹匣有弹:拉栓顶上膛,按枪的拉栓耗时等足再打
                 Tacz.bolt(her);
+                waitUntil = now + Tacz.waitTicks(Tacz.boltTimeSeconds(stack));
                 return TaskState.RUNNING;
             }
             case NO_AMMO -> {
@@ -84,9 +97,18 @@ final class ShootTask implements Task {
                 Tacz.reload(her);
                 return TaskState.RUNNING;
             }
+            case NOT_DRAW -> {
+                // 枪没登记成当前操作对象:切枪,女仆的同款处理
+                Tacz.draw(her);
+                return TaskState.RUNNING;
+            }
             case COOL_DOWN, IS_RELOADING, IS_BOLTING, IS_SPRINTING, IS_DRAWING, IS_MELEE -> {
                 // 状态又变了:等下一刻
                 return TaskState.RUNNING;
+            }
+            case OVERHEATED -> {
+                outcome = "the gun is overheated and locked; wait for it to cool down";
+                return TaskState.FAILED;
             }
             default -> {
                 outcome = "could not fire: " + lastResult;
