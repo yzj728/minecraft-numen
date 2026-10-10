@@ -4,6 +4,7 @@ import com.tacz.guns.api.TimelessAPI;
 import com.tacz.guns.api.entity.IGunOperator;
 import com.tacz.guns.api.entity.ShootResult;
 import com.tacz.guns.api.item.IGun;
+import com.tacz.guns.entity.shooter.ShooterDataHolder;
 import com.tacz.guns.resource.index.CommonGunIndex;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.InteractionHand;
@@ -16,7 +17,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.Supplier;
 
 /**
  * 本插件对接 TACZ 的那一面——<b>唯一</b>知道 TACZ 存在的地方,别处(API、技能、入口)都不碰 TACZ 的类型。
@@ -36,6 +36,12 @@ import java.util.function.Supplier;
  * 带时间戳的重载要过一个 {@code SERVER_SHOOT_NETWORK_V} 的网络时钟校验,那个是给真客户端抗延迟用的;
  * 不带时间戳的重载在 TACZ 的 mixin 里自己填 {@code now - baseTimestamp},正好落在校验窗口内,同伴(没有
  * 客户端)才开得出这一枪。
+ *
+ * <h2>枪械是状态机,开枪前要把状态摆对</h2>
+ * TACZ 的 {@code shoot} 对枪的状态有前置检查,不满足时一枪不开、只回一个结果码:换弹中({@code IS_RELOADING})、
+ * 拉栓中({@code IS_BOLTING})、疾跑中({@code IS_SPRINTING})、手动枪膛内无弹({@code NEED_BOLT})、冷却中
+ * ({@code COOL_DOWN})。所以本插件除了扣扳机,还要把手动枪的拉栓({@link #bolt})暴露出去,并把枪的状态
+ * ({@link #held})原样报给模型——它看结果码自己把状态摆对,本类不替它做重试。
  */
 public final class Tacz {
 
@@ -51,7 +57,7 @@ public final class Tacz {
         }
     }
 
-    /** TACZ 认得的全部枪械 id,按排序权重。 */
+    /** TACZ 认得的全部枪械 id,按名排序。 */
     public static List<String> gunIds() {
         Set<Map.Entry<ResourceLocation, CommonGunIndex>> all = TimelessAPI.getAllCommonGunIndex();
         List<String> out = new ArrayList<>(all.size());
@@ -66,6 +72,46 @@ public final class Tacz {
     public static int ammoCount(ItemStack stack) {
         IGun gun = IGun.getIGunOrNull(stack);
         return gun == null ? -1 : gun.getCurrentAmmoCount(stack);
+    }
+
+    /** 主手一把枪此刻的状态。不是枪时拿不到,调用方先判枪再问。 */
+    public record Held(@Deprecated boolean bulletInBarrel,
+                       @Deprecated boolean reloading,
+                       @Deprecated boolean bolting,
+                       @Deprecated boolean sprinting,
+                       @Deprecated long coolDownMs) {
+
+        public boolean bulletInBarrel() {
+            return bulletInBarrel;
+        }
+
+        public boolean reloading() {
+            return reloading;
+        }
+
+        public boolean bolting() {
+            return bolting;
+        }
+
+        public boolean sprinting() {
+            return sprinting;
+        }
+
+        public long coolDownMs() {
+            return coolDownMs;
+        }
+    }
+
+    /** 读主手那把枪的服务端状态:膛内子弹、换弹中、拉栓中、疾跑中、射击冷却还剩多少毫秒。不是枪返回 null。 */
+    public static Held held(LivingEntity shooter, ItemStack stack) {
+        IGun gun = IGun.getIGunOrNull(stack);
+        if (gun == null) {
+            return null;
+        }
+        IGunOperator op = IGunOperator.fromLivingEntity(shooter);
+        ShooterDataHolder data = op.getDataHolder();
+        return new Held(gun.hasBulletInBarrel(stack), data.reloadStateType.isReloading(), data.isBolting,
+                data.sprintTimeS > 0, op.getSynShootCoolDown());
     }
 
     /** 一个玩家的背包里有没有某把枪(id 匹配),有的话在第几格。返回 -1 表示没有。 */
@@ -107,6 +153,11 @@ public final class Tacz {
         player.setItemInHand(InteractionHand.MAIN_HAND, gun);
         inv.setItem(slot, hand);
         IGunOperator.fromLivingEntity(player).initialData();
+    }
+
+    /** 拉栓:手动枪(开火回执是 need_bolt)把下一发顶上膛。自动枪不需要,拉了也不动。 */
+    public static void bolt(LivingEntity shooter) {
+        IGunOperator.fromLivingEntity(shooter).bolt();
     }
 
     /** 朝目标的视线方向开一枪:算指向它的俯仰/偏航,交给 TACZ 的 shoot。 */
