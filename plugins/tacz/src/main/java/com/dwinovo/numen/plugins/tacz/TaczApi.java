@@ -22,7 +22,8 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * {@code tacz.gun}:用 TACZ 枪械——现在有哪些枪、把包里的枪拿到手上、朝一只实体开枪、拉栓、换弹、切开火模式、开/关瞄准。
+ * {@code tacz.gun}:用 TACZ 枪械——现在有哪些枪、把包里的枪拿到手上、朝一只实体开枪、朝面朝方向开枪、拉栓、换弹、
+ * 切开火模式、开/关瞄准。
  *
  * <p>全在服务端。开枪走 TACZ 的 {@code IGunOperator} 直接驱动同伴(服务端假玩家),不依赖客户端网络包;伤人的那一下照
  * 规矩交由权限层裁决({@code Action.attack})——要打的主人、宠物、村民那些,主人没放行就开不了这一枪,也就不会误伤。
@@ -33,7 +34,8 @@ import java.util.Optional;
  *
  * <p><b>shoot 是一段自动的开火短活</b>,状态机照车万女仆验证过的枪械逻辑逐条对齐:手动枪膛空就拉栓、弹匣空就换弹、
  * 没切枪就切枪、狙击枪先开镜、等冷却/换弹/拉栓收尾、疾跑就站定——直到子弹出膛,或实在开不了枪(没弹药、枪不在手上)。
- * 模型不必逐码处理,一次调用拿最终结果。手动 bolt/reload/aim 仍然单独暴露,供精细控制。
+ * 开火期间按住战斗与逃跑两条本能,身体不被抢、不乱跑。模型不必逐码处理,一次调用拿最终结果。手动
+ * bolt/reload/aim 仍然单独暴露,供精细控制。
  */
 public final class TaczApi {
 
@@ -41,7 +43,7 @@ public final class TaczApi {
 
     public static void install(NumenApi numen) {
         numen.api("gun", "TACZ firearms: list them, take one in hand, shoot at an entity (auto bolt/reload/scope), "
-                + "work the bolt, reload, switch fire mode, aim.", TaczApi.class);
+                + "fire where you face, work the bolt, reload, switch fire mode, aim.", TaczApi.class);
     }
 
     /** 现况:有哪些枪、手上是什么、枪此刻什么状态。 */
@@ -128,7 +130,7 @@ public final class TaczApi {
     /**
      * 朝一只实体开一枪。先过权限层(攻击那只实体),放行了就派一段自动开火短活,状态机照车万女仆验证过的枪械逻辑:
      * 手动枪膛空先拉栓、弹匣空先换弹、没切枪先切枪、狙击枪先开镜、等冷却与换弹/拉栓收尾、疾跑站定——直到子弹
-     * 出膛,或者实在开不了(没弹药、手上没枪)。
+     * 出膛,或者实在开不了(没弹药、手上没枪)。开火期间按住战斗与逃跑两条本能,身体不被抢、不乱跑。
      *
      * <p>不走路、不量距离:打得中打不中取决于你站哪、看不看得见;先 {@code numen.scan.sight} 确认、{@code numen.move.to}
      * 走过去,再打。
@@ -139,11 +141,12 @@ public final class TaczApi {
     @Note("One shot per call: it fires once and reports. For several shots, call it once for each.")
     @Note("It uses the gun you hold (tacz.gun.equip first) and readies it on its own: manual-action guns are chambered, "
             + "empty magazines are reloaded if you carry matching ammo, sniper rifles are scoped in before the shot.")
+    @Note("While it fires, your combat and flee instincts stand down, so nothing else grabs the body mid-shot.")
     @Note("Attacking asks your owner first when it should: shooting your owner's pets, named mobs or villagers is "
             + "decided by the permission layer, not by you.")
     @Note("It does not travel and does not check distance: hit or miss depends on where you stand and whether you can "
             + "see it (numen.scan.sight). When it could not fire at all, it fails and says why (no ammo, no gun, …).")
-    @SeeAlso({"tacz.gun.equip", "tacz.gun.options", "numen.scan.sight", "numen.fight.attack"})
+    @SeeAlso({"tacz.gun.equip", "tacz.gun.fire", "tacz.gun.options", "numen.scan.sight", "numen.fight.attack"})
     public static Pending<Fired> shoot(ServerCall call, Shoot args) {
         Entity target = call.entity(args.target());
         if (!(target instanceof LivingEntity)) {
@@ -153,6 +156,25 @@ public final class TaczApi {
         int targetId = target.getId();
         // 伤人先过权限层;放行了把开火短活派下去(它自己重新解析目标、摆对枪的状态)
         return call.authorize(Action.attack(target)).thenWait(allowed -> call.sync(new ShootRecord(call, targetId)));
+    }
+
+    /** 朝面朝方向开一枪(无目标)。 */
+    @Fn("Fire the gun in your main hand straight ahead, where you face — no target.")
+    @Example("tacz.gun.fire()")
+    @Note("The shot follows your current facing. Use it to test a gun, or to shoot at nothing.")
+    @Note("It does not aim and does not check for friendlies: for shooting at an entity use tacz.gun.shoot, which "
+            + "aims and goes through the permission layer.")
+    @Note("It still needs the gun ready (equipped, ammo); the result says why when it did not fire.")
+    @SeeAlso({"tacz.gun.shoot", "tacz.gun.equip"})
+    public static Fired fire(ServerCall call) {
+        NumenPlayer her = call.her();
+        ItemStack stack = her.getMainHandItem();
+        com.tacz.guns.api.item.IGun gun = com.tacz.guns.api.item.IGun.getIGunOrNull(stack);
+        if (gun == null) {
+            throw new ApiError(ErrorKind.FAILED, "you hold no gun; tacz.gun.equip first", Call.of("tacz.gun.equip"));
+        }
+        String result = Tacz.fire(her).name().toLowerCase(java.util.Locale.ROOT);
+        return new Fired(-1, result);
     }
 
     /** 拉栓:手动枪把下一发顶上膛。 */
