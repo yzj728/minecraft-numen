@@ -39,6 +39,8 @@ public final class Builtin {
         gate.open("curios", () -> com.dwinovo.numen.plugins.curios.NumenCurios::install);
         gate.open("ftbquests", "ftbquests",
                 skills -> () -> com.dwinovo.numen.plugins.ftbquests.NumenFtbQuests.install(skills));
+        gate.open("tacz", "tacz",
+                skills -> () -> com.dwinovo.numen.plugins.tacz.NumenTacz.install(modBus, skills));
         // 注:这个 MC 版本上车万女仆没有按坐标播语音的口,所以那个联动只做模型不做语音。
     }
 
