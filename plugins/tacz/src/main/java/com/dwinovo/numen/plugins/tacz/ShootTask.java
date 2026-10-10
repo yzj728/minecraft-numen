@@ -20,12 +20,16 @@ import net.minecraft.world.item.ItemStack;
  * 没切枪就切({@code NOT_DRAW})、每步按枪械数据的耗时等足再打。这里逐条照做,只把女仆的
  * "每 N tick 再调一次"换成任务等刻度——同一套逻辑,同一个节拍。
  *
+ * <h2>身体先站定、再转向,然后才扣扳机</h2>
+ * 开枪需要疾跑状态清空,而且子弹方向必须和身体朝向一致(玩家看到枪口朝哪,子弹往哪)。
+ * 所以每刻先把移动键松开站定、把身体与头转向目标,再问枪的状态、扣扳机。
+ *
  * <h2>为什么按住战斗与逃跑两条本能</h2>
  * 同伴身上有 {@code mob_defense}(怪逼近就自动开打,按原版剑/弓逻辑走位,不认识 TACZ 枪)与
  * {@code flee}(判定为空手或扛不住就被追着跑,同样不认识枪)两条反射链,优先级都高于同步短活。
  * 它们一抢身体,开火任务就永远轮不到,枪自然开不出来——"遇敌乱跑、开不了枪"正是它们干的。
- * 官方 {@code attack} 任务开工时按住 {@code mob_defense} 是同一条路;这里把两条都按住:
- * 开火的这几刻身体归这个任务,本能不抢。任务一结束,空闲时由引擎统一解除,不用显式还。
+ * 派发那一刻(TaczApi.shoot)就已经按住,这里每刻再按一次兜底。任务一结束,空闲时由引擎
+ * 统一解除,不用显式还。
  */
 final class ShootTask implements Task {
 
@@ -65,6 +69,10 @@ final class ShootTask implements Task {
             outcome = "no TACZ gun in your main hand; tacz.gun.equip first";
             return TaskState.FAILED;
         }
+        // 身体先站定(松开一切移动键、停掉疾跑),再转向目标:弹道和看得见的枪口朝向一致
+        her.controls().releaseAll();
+        her.setSprinting(false);
+        Tacz.face(her, living);
         long now = her.serverLevel().getGameTime();
         // 开镜/拉栓的耗时还没走完:等着
         if (now < waitUntil) {
@@ -77,7 +85,6 @@ final class ShootTask implements Task {
         }
         // 疾跑中开不了枪(同伴寻路会疾跑):站定,下一刻再试
         if (held.sprinting()) {
-            her.setSprinting(false);
             return TaskState.RUNNING;
         }
         ShootResult shot = Tacz.shoot(her, living);
