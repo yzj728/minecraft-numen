@@ -20,10 +20,19 @@ import net.minecraft.world.item.ItemStack;
  * 没切枪就切({@code NOT_DRAW})、每步按枪械数据的耗时等足再打。这里逐条照做,只把女仆的
  * "每 N tick 再调一次"换成任务等刻度——同一套逻辑,同一个节拍。
  *
- * <p>客户端的自动换弹/自动拉栓/自动开镜对同伴无效(它是没有客户端的服务端假玩家),
- * 所以这几种事都由这个任务在服务端替它做。
+ * <h2>为什么按住战斗与逃跑两条本能</h2>
+ * 同伴身上有 {@code mob_defense}(怪逼近就自动开打,按原版剑/弓逻辑走位,不认识 TACZ 枪)与
+ * {@code flee}(判定为空手或扛不住就被追着跑,同样不认识枪)两条反射链,优先级都高于同步短活。
+ * 它们一抢身体,开火任务就永远轮不到,枪自然开不出来——"遇敌乱跑、开不了枪"正是它们干的。
+ * 官方 {@code attack} 任务开工时按住 {@code mob_defense} 是同一条路;这里把两条都按住:
+ * 开火的这几刻身体归这个任务,本能不抢。任务一结束,空闲时由引擎统一解除,不用显式还。
  */
 final class ShootTask implements Task {
+
+    /** 自卫链的名字(见 core 的 {@code MobDefenseChain.ID});本模块编译期看不见 core,照 id 按住。 */
+    private static final String MOB_DEFENSE = "mob_defense";
+    /** 逃跑链的名字(见 core 的 {@code FleeChain.ID})。 */
+    private static final String FLEE = "flee";
 
     private final ShootRecord r;
     /** 走到终态时说给模型听的那句话。 */
@@ -41,6 +50,10 @@ final class ShootTask implements Task {
 
     @Override
     public TaskState tick(NumenPlayer her) {
+        // 开火的这几刻身体归我管:战斗与逃跑本能别来抢(空闲时引擎统一解除)
+        her.pauseReflex(MOB_DEFENSE);
+        her.pauseReflex(FLEE);
+
         Entity found = her.serverLevel().getEntity(r.targetId);
         if (!(found instanceof LivingEntity living) || !living.isAlive()) {
             outcome = "the target is gone (died or left) before a shot went off";
@@ -62,7 +75,7 @@ final class ShootTask implements Task {
         if (held.reloading() || held.bolting() || held.coolDownMs() > 0) {
             return TaskState.RUNNING;
         }
-        // 疾跑中开不了枪(女仆 AI 不会疾跑,同伴寻路会):站定,下一刻再试
+        // 疾跑中开不了枪(同伴寻路会疾跑):站定,下一刻再试
         if (held.sprinting()) {
             her.setSprinting(false);
             return TaskState.RUNNING;
