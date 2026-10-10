@@ -3,6 +3,7 @@ package com.dwinovo.numen.plugins.tacz;
 import com.tacz.guns.api.TimelessAPI;
 import com.tacz.guns.api.entity.IGunOperator;
 import com.tacz.guns.api.entity.ShootResult;
+import com.tacz.guns.api.item.GunTabType;
 import com.tacz.guns.api.item.IGun;
 import com.tacz.guns.entity.shooter.ShooterDataHolder;
 import com.tacz.guns.resource.index.CommonGunIndex;
@@ -15,6 +16,7 @@ import net.minecraft.world.item.ItemStack;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -29,19 +31,18 @@ import java.util.Set;
  * <h2>开枪的入口</h2>
  * TACZ 通过 Mixin 给 {@link LivingEntity} 实现了 {@link IGunOperator}(见 TACZ 的
  * {@code LivingEntityMixin}),同伴是服务端假玩家({@code ServerPlayer} 是 {@code LivingEntity} 的子类),
- * 所以 {@code IGunOperator.fromLivingEntity(companion)} 直接可用。开枪是服务端逻辑,不依赖客户端网络包:
- * {@link IGunOperator#draw} 设置当前枪、{@link IGunOperator#shoot} 朝给定俯仰/偏航开一枪。
+ * 所以 {@code IGunOperator.fromLivingEntity(companion)} 直接可用。
+ *
+ * <h2>打法的出处:车万女仆验证过的枪械逻辑</h2>
+ * 车万女仆(TouhouLittleMaid)官方内置了 TACZ 兼容,它的 {@code TacInnerCompat.performGunAttack}
+ * 是<b>在真实游戏里验证过能打中</b>的完整状态机:瞄准角公式、狙击枪开镜、拉栓、换弹、
+ * NOT_DRAW 时切枪。本插件的瞄准与准备流程照它逐条对齐——女仆怎么做,同伴就怎么做,
+ * 只有"目标"和"身体"换成同伴自己。
  *
  * <h2>为什么用 {@code shoot(pitch, yaw)} 而不是带时间戳的那个</h2>
  * 带时间戳的重载要过一个 {@code SERVER_SHOOT_NETWORK_V} 的网络时钟校验,那个是给真客户端抗延迟用的;
  * 不带时间戳的重载在 TACZ 的 mixin 里自己填 {@code now - baseTimestamp},正好落在校验窗口内,同伴(没有
- * 客户端)才开得出这一枪。
- *
- * <h2>枪械是状态机,开枪前要把状态摆对</h2>
- * TACZ 的 {@code shoot} 对枪的状态有前置检查,不满足时一枪不开、只回一个结果码:换弹中({@code IS_RELOADING})、
- * 拉栓中({@code IS_BOLTING})、疾跑中({@code IS_SPRINTING})、手动枪膛内无弹({@code NEED_BOLT})、冷却中
- * ({@code COOL_DOWN})。所以本插件除了扣扳机,还要把手动枪的拉栓({@link #bolt})暴露出去,并把枪的状态
- * ({@link #held})原样报给模型——它看结果码自己把状态摆对,本类不替它做重试。
+ * 客户端)才开得出这一枪。女仆走的是同一条无时间戳路径。
  */
 public final class Tacz {
 
@@ -131,15 +132,26 @@ public final class Tacz {
         IGunOperator.fromLivingEntity(player).initialData();
     }
 
+    /** 切枪:把主手物品登记成当前操作的枪(女仆的 NOT_DRAW 处理)。 */
+    public static void draw(LivingEntity shooter) {
+        IGunOperator.fromLivingEntity(shooter).draw(shooter::getMainHandItem);
+    }
+
     /** 拉栓:手动枪(开火回执是 need_bolt)把下一发顶上膛。自动枪不需要,拉了也不动。 */
     public static void bolt(LivingEntity shooter) {
         IGunOperator.fromLivingEntity(shooter).bolt();
     }
 
-    /** 朝目标的视线方向开一枪:算指向它的俯仰/偏航,交给 TACZ 的 shoot。 */
+    /** 朝目标的视线方向开一枪。瞄准角照车万女仆验证过的公式,一字不改。 */
     public static ShootResult shoot(LivingEntity shooter, LivingEntity target) {
         IGunOperator op = IGunOperator.fromLivingEntity(shooter);
-        return op.shoot(() -> pitch(shooter, target), () -> yaw(shooter, target));
+        // 车万女仆 TacInnerCompat.performGunAttack 的瞄准公式:目标中心对射手脚底
+        double x = target.getX() - shooter.getX();
+        double y = target.getEyeY() - shooter.getEyeY();
+        double z = target.getZ() - shooter.getZ();
+        float yaw = (float) -Math.toDegrees(Math.atan2(x, z));
+        float pitch = (float) -Math.toDegrees(Math.atan2(y, Math.sqrt(x * x + z * z)));
+        return op.shoot(() -> pitch, () -> yaw);
     }
 
     public static void reload(LivingEntity shooter) {
@@ -154,19 +166,44 @@ public final class Tacz {
         IGunOperator.fromLivingEntity(shooter).aim(aiming);
     }
 
-    /** 俯仰角(xRot):从眼睛朝目标眼睛的视线。原版 {@code Vec3.directionFromRotation} 的反解。 */
-    private static float pitch(LivingEntity shooter, LivingEntity target) {
-        net.minecraft.world.phys.Vec3 d = view(shooter, target);
-        return (float) Math.toDegrees(Math.asin(-d.y));
+    /** 她此刻开没开镜。 */
+    public static boolean isAiming(LivingEntity shooter) {
+        return IGunOperator.fromLivingEntity(shooter).getSynIsAiming();
     }
 
-    /** 偏航角(yRot):同上。 */
-    private static float yaw(LivingEntity shooter, LivingEntity target) {
-        net.minecraft.world.phys.Vec3 d = view(shooter, target);
-        return (float) Math.toDegrees(Math.atan2(-d.x, d.z));
+    /** 这把枪是不是狙击枪(按 TACZ 的枪械分类)。女仆对狙击枪必开镜再打。 */
+    public static boolean isSniper(ItemStack stack) {
+        IGun gun = IGun.getIGunOrNull(stack);
+        if (gun == null) {
+            return false;
+        }
+        return TimelessAPI.getCommonGunIndex(gun.getGunId(stack))
+                .map(index -> GunTabType.SNIPER.name().toLowerCase(Locale.ENGLISH).equals(index.getType()))
+                .orElse(false);
     }
 
-    private static net.minecraft.world.phys.Vec3 view(LivingEntity shooter, LivingEntity target) {
-        return target.getEyePosition().subtract(shooter.getEyePosition()).normalize();
+    /** 这把枪的瞄准耗时(秒):开镜进度走满要这么久。查不到按默认 0.2。 */
+    public static float aimTimeSeconds(ItemStack stack) {
+        IGun gun = IGun.getIGunOrNull(stack);
+        if (gun == null) {
+            return 0.2f;
+        }
+        return TimelessAPI.getCommonGunIndex(gun.getGunId(stack))
+                .map(index -> index.getGunData().getAimTime()).orElse(0.2f);
+    }
+
+    /** 这把枪的拉栓耗时(秒)。 */
+    public static float boltTimeSeconds(ItemStack stack) {
+        IGun gun = IGun.getIGunOrNull(stack);
+        if (gun == null) {
+            return 0f;
+        }
+        return TimelessAPI.getCommonGunIndex(gun.getGunId(stack))
+                .map(index -> index.getGunData().getBoltActionTime()).orElse(0f);
+    }
+
+    /** 秒折成刻,外加两刻余量——女仆那套"等 aimTime/drawTime/boltTime 再打"的同款算法。 */
+    public static long waitTicks(float seconds) {
+        return Math.round(Math.max(0f, seconds) * 20) + 2;
     }
 }
