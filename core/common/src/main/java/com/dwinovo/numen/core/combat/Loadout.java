@@ -1,5 +1,6 @@
 package com.dwinovo.numen.core.combat;
 
+import com.dwinovo.numen.api.combat.Firearms;
 import com.dwinovo.numen.entity.NumenPlayer;
 
 import net.minecraft.world.entity.Entity;
@@ -13,6 +14,10 @@ import net.minecraft.world.item.ItemStack;
  * 它们不可比:弓的攻击力是 0(伤害在箭上),放进同一张按攻击力排的榜里永远垫底,
  * 于是背着弓的她照样会去拿石剑贴脸。够不够得着由 {@link AttackPlan} 判,这里只负责
  * "每条路上最好的那把是哪把"。
+ *
+ * <p><b>枪械(经 {@link Firearms} 注册)排在远程最前</b>:枪拿起就能打,不用拉弓蓄力;
+ * 而且带着枪时近战让位——她是枪手不是剑客,战斗会优先拉开距离开枪,而不是切剑贴脸。
+ * 逃跑判据也吃这一口:带枪就是"有武器",不会再被当赤手空拳追着跑。
  */
 public final class Loadout {
 
@@ -29,12 +34,12 @@ public final class Loadout {
         this.rangedCharged = rangedCharged;
     }
 
-    /** 近战最狠的那把;赤手空拳时 null。 */
+    /** 近战最狠的那把;赤手空拳、或带着枪(枪手不近战)时 null。 */
     public Pick melee() {
         return melee;
     }
 
-    /** 能立刻用的远程武器;没有弓弩、或有弓弩没箭时 null。 */
+    /** 能立刻用的远程武器;没有弓弩/枪、或有弓弩没箭时 null。 */
     public Pick ranged() {
         return ranged;
     }
@@ -54,8 +59,8 @@ public final class Loadout {
 
     /**
      * 扫一遍背包。近战按 {@link WeaponDamage#against} 对<b>这个目标</b>排序;远程按
-     * "已上弦的弩 &gt; 弓 &gt; 未上弦的弩"挑——上弦的弩省掉整个拉弓周期,
-     * 而弓的蓄力比给弩上弦快。
+     * "枪械 &gt; 已上弦的弩 &gt; 弓 &gt; 未上弦的弩"挑——枪拿起就能打,上弦的弩省掉整个拉弓周期,
+     * 而弓的蓄力比给弩上弦快。带着枪时近战为 null:战斗判据会走远程,拉开距离开枪。
      */
     public static Loadout forTarget(NumenPlayer player, Entity target) {
         Inventory inventory = player.getInventory();
@@ -63,10 +68,17 @@ public final class Loadout {
         Pick chargedCrossbow = null;
         Pick bow = null;
         Pick loadableCrossbow = null;
+        Pick bestFirearm = null;
 
         for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
             ItemStack stack = inventory.getItem(slot);
             if (stack.isEmpty()) {
+                continue;
+            }
+            if (Firearms.isFirearm(stack)) {
+                if (bestFirearm == null) {
+                    bestFirearm = new Pick(slot, stack, 0.0);
+                }
                 continue;
             }
             if (stack.getItem() instanceof CrossbowItem) {
@@ -91,9 +103,12 @@ public final class Loadout {
             }
         }
 
-        Pick ranged = chargedCrossbow != null ? chargedCrossbow
+        Pick ranged = bestFirearm != null ? bestFirearm
+                : chargedCrossbow != null ? chargedCrossbow
                 : bow != null ? bow
                 : loadableCrossbow;
-        return new Loadout(bestMelee, ranged, ranged != null && ranged == chargedCrossbow);
+        // 有枪时近战让位:她是枪手,战斗拉开距离开枪,而不是切剑贴脸
+        Pick melee = bestFirearm != null ? null : bestMelee;
+        return new Loadout(melee, ranged, ranged != null && ranged == chargedCrossbow);
     }
 }
