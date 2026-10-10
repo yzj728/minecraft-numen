@@ -31,17 +31,17 @@ import java.util.Optional;
  * {@code numen.move.to} 与 {@code numen.scan.sight} 先办好。本组里的改装备(拿枪、拉栓、换弹、瞄准)是同伴自己的装备,
  * 不问主人;只有"对谁开枪"这一件伤人,过权限层。
  *
- * <p><b>shoot 是一段自动的开火短活</b>:任务在服务器刻里自己把枪的状态机摆对——手动枪膛空就拉栓、弹匣空就换弹、
- * 等冷却与换弹收尾、疾跑就站定——直到子弹出膛,或实在开不了枪(没弹药、枪不在手上)。模型不必逐码处理,一次调用
- * 拿最终结果。手动 bolt/reload 仍然单独暴露,供精细控制。
+ * <p><b>shoot 是一段自动的开火短活</b>,状态机照车万女仆验证过的枪械逻辑逐条对齐:手动枪膛空就拉栓、弹匣空就换弹、
+ * 没切枪就切枪、狙击枪先开镜、等冷却/换弹/拉栓收尾、疾跑就站定——直到子弹出膛,或实在开不了枪(没弹药、枪不在手上)。
+ * 模型不必逐码处理,一次调用拿最终结果。手动 bolt/reload/aim 仍然单独暴露,供精细控制。
  */
 public final class TaczApi {
 
     private TaczApi() {}
 
     public static void install(NumenApi numen) {
-        numen.api("gun", "TACZ firearms: list them, take one in hand, shoot at an entity (auto bolt/reload), work the "
-                + "bolt, reload, switch fire mode, aim.", TaczApi.class);
+        numen.api("gun", "TACZ firearms: list them, take one in hand, shoot at an entity (auto bolt/reload/scope), "
+                + "work the bolt, reload, switch fire mode, aim.", TaczApi.class);
     }
 
     /** 现况:有哪些枪、手上是什么、枪此刻什么状态。 */
@@ -126,18 +126,19 @@ public final class TaczApi {
                         String result) {}
 
     /**
-     * 朝一只实体开一枪。先过权限层(攻击那只实体),放行了就派一段自动开火短活:任务在服务器刻里把枪摆对——
-     * 手动枪膛空先拉栓,弹匣空先换弹,疾跑站定,等冷却与换弹收尾——直到子弹出膛,或者实在开不了(没弹药、手上没枪)。
+     * 朝一只实体开一枪。先过权限层(攻击那只实体),放行了就派一段自动开火短活,状态机照车万女仆验证过的枪械逻辑:
+     * 手动枪膛空先拉栓、弹匣空先换弹、没切枪先切枪、狙击枪先开镜、等冷却与换弹/拉栓收尾、疾跑站定——直到子弹
+     * 出膛,或者实在开不了(没弹药、手上没枪)。
      *
      * <p>不走路、不量距离:打得中打不中取决于你站哪、看不看得见;先 {@code numen.scan.sight} 确认、{@code numen.move.to}
      * 走过去,再打。
      */
-    @Fn("Shoot at one entity with the gun in your main hand, readying the gun itself (bolt, reload) as needed.")
+    @Fn("Shoot at one entity with the gun in your main hand, readying the gun itself (bolt, reload, scope) as needed.")
     @Example("tacz.gun.shoot(184)")
     @Example("local e = numen.scan.entities(\"hostile\")[1]; tacz.gun.shoot(e)")
     @Note("One shot per call: it fires once and reports. For several shots, call it once for each.")
-    @Note("It uses the gun you hold (tacz.gun.equip first) and works its bolt/reload on its own — manual-action guns "
-            + "are chambered for you, empty magazines are reloaded if you carry matching ammo.")
+    @Note("It uses the gun you hold (tacz.gun.equip first) and readies it on its own: manual-action guns are chambered, "
+            + "empty magazines are reloaded if you carry matching ammo, sniper rifles are scoped in before the shot.")
     @Note("Attacking asks your owner first when it should: shooting your owner's pets, named mobs or villagers is "
             + "decided by the permission layer, not by you.")
     @Note("It does not travel and does not check distance: hit or miss depends on where you stand and whether you can "
@@ -194,6 +195,7 @@ public final class TaczApi {
     @Example("tacz.gun.aim(true)")
     @Example("tacz.gun.aim(false)")
     @Note("Aiming affects the gun's spread; it does not by itself fire anything.")
+    @Note("Sniper rifles are scoped in automatically by tacz.gun.shoot; use this for the other guns or to scope out.")
     @SeeAlso({"tacz.gun.shoot", "tacz.gun.options"})
     public static void aim(ServerCall call, Aim args) {
         Tacz.aim(call.her(), args.aim());
