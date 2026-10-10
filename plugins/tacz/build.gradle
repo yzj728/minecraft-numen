@@ -1,0 +1,30 @@
+plugins {
+    id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+    id 'numen-plugin'
+}
+
+// TACZ(枪械模组)只发 Forge 1.20.1 版,本联动只在 Forge 上存在,编译对着 Forge。Fabric/NeoForge 那边没有 TACZ,
+// 也不需要有。TACZ 代码开源且类名不混淆(GPL-3.0),所以本联动直接编译依赖它的 API 类,拿真正的
+// IGunOperator / GunItemBuilder / TimelessAPI 对象来驱动同伴开枪,而不是隔着命令行猜。
+minecraft {
+    mappings channel: 'official', version: minecraft_version
+}
+
+repositories {
+    // TACZ 发在 CurseForge,经 CurseMaven 转成 maven 坐标。
+    // 不用 exclusiveContent:ForgeGradle 的 fg.deobf 从项目的仓库列表里找原件,认不得那一层包装。
+    maven {
+        name = 'Curse Maven'
+        url = 'https://www.cursemaven.com'
+        content { includeGroup 'curse.maven' }
+    }
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
+    // 瘦 api jar 取 Forge 那份:本联动本来就只跑在 Forge 上
+    compileOnly files(project(':api:forge').tasks.named('apiJar'))
+    // 运行时由玩家自己装的那份提供;本模块不携带 TACZ 一个字节。1028108 是 TACZ 的 CurseForge 项目 id,
+    // 8141310 是 1.20.1 的 1.1.8-hotfix 文件号,见 gradle.properties 的 tacz_version。
+    compileOnly fg.deobf("curse.maven:timeless-and-classics-zero-1028108:${tacz_version}")
+}
