@@ -859,6 +859,10 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
      * 每刻转会带偏脚。疾跑中枪也打不出,先站定。
      */
     private TaskState shootFirearm(Loadout.Pick weapon) {
+        // 枪只能打活物(末影水晶这类不是 LivingEntity 的走原版近战路径)
+        if (!(target instanceof LivingEntity livingTarget)) {
+            return closeIn();
+        }
         if (player.distanceTo(target) > BOW_MAX_DISTANCE) {
             return TaskState.RUNNING;   // 射程外:不放,走位环自然靠近
         }
@@ -874,7 +878,7 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         }
         // 站定:枪和弓一样,疾跑中打不出
         player.setSprinting(false);
-        String result = firearm.tickShoot(player, weapon.stack(), target);
+        String result = firearm.tickShoot(player, weapon.stack(), livingTarget);
         if (result == null) {
             return TaskState.RUNNING;   // 这一拍没打(拉栓/换弹/冷却中),下一刻再问
         }
