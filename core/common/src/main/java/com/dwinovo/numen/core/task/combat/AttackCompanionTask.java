@@ -26,6 +26,8 @@ import com.dwinovo.numen.permission.Permission;
 import com.dwinovo.numen.permission.Verdict;
 import com.dwinovo.numen.task.Preparation;
 import com.dwinovo.numen.task.TaskState;
+import com.dwinovo.numen.api.combat.Firearms;
+import com.dwinovo.numen.api.combat.RangedFirearm;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -52,7 +54,8 @@ import com.dwinovo.numen.pathing.body.BodyCompat;
  *
  * <h2>三套武器学,一个判据</h2>
  * 挥击(冷却与无敌帧)、射击(弹道与拉弓)、躲避(势场),各自是真正不同的东西;
- * 选哪一套则只有一处判据 {@link AttackPlan},本能链用的也是同一处。
+ * 选哪一套则只有一处判据 {@link AttackPlan},本能链用的也是同一处。枪械(经 {@link Firearms}
+ * 注册)走远程那一套:拿起就打,不用拉弓,状态机(拉栓/换弹/开镜/冷却)由枪械插件自己摆。
  *
  * <h2>会炸的东西</h2>
  * 爬行者<b>引信点着之前就是一只普通怪</b>:她够得着 4 格、它 3 格才点火,中间那条一格宽的带
@@ -789,6 +792,10 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         if (weapon == null) {
             return closeIn();   // 弓没了:回去走位,别放弃这只
         }
+        // 枪械:拿起就打,不用拉弓——每刻让枪械插件摆状态、能打就开一枪
+        if (Firearms.isFirearm(weapon.stack())) {
+            return shootFirearm(weapon);
+        }
         // <b>攻击层不管距离。</b>射程之内就射,拉开是寻路的事(环的内沿 BOW_MIN_DISTANCE)。
         //
         // 这里曾经"近于内沿就 abortShot":僵尸一走进八格,拉到一半的弓当场取消;她退开、
@@ -811,7 +818,7 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         // 就能走。这里曾经 stopNav() + halt(),而 bowFight 上一行刚 driveApproach() 建好
         // 导航,于是每刻建一次拆一次,箭一直拉不满。
         // <b>只在快松手那一刻转过去。</b>原版的箭朝哪飞只看松手那一刻的视线,拉弓的十几刻
-        // 里瞄不瞄没有区别 —— 而每刻转向会把脚带偏(移动按朝向投影),她就一路走进目标脸上。
+        // 里瞄不瞄没有区别 —— 而每刻转向会把脚带偏(移动是按朝向投影),她就一路走进目标脸上。
         // 挥刀早就是这么做的,弓这一支一直没跟上。
         if (shot != null && shot.aboutToRelease()) {
             InputDriver.lookAt(player, aim.lookPoint());
@@ -842,6 +849,41 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
                 fail("the bow or crossbow did not launch an arrow", FailureType.WRONG_TOOL);
                 return TaskState.FAILED;
             }
+        }
+        return TaskState.RUNNING;
+    }
+
+    /**
+     * 枪械路径:枪不用拉弓蓄力,每刻让枪械插件(经 {@link Firearms})摆状态、能打就开一枪。
+     * 走位环照弓那套(8~12 格),朝向在开火那一拍由插件自己转——和弓"松手前才瞄"同一个道理,
+     * 每刻转会带偏脚。疾跑中枪也打不出,先站定。
+     */
+    private TaskState shootFirearm(Loadout.Pick weapon) {
+        if (player.distanceTo(target) > BOW_MAX_DISTANCE) {
+            return TaskState.RUNNING;   // 射程外:不放,走位环自然靠近
+        }
+        RangedFirearm firearm = Firearms.of(weapon.stack());
+        if (firearm == null) {
+            return closeIn();   // 枪被换掉了:回去走位
+        }
+        // 换枪到手(和弓一样:这一刻只换手)
+        ItemStack before = player.getMainHandItem();
+        Hotbar.hold(player, weapon.slot());
+        if (player.getMainHandItem() != before) {
+            return TaskState.RUNNING;
+        }
+        // 站定:枪和弓一样,疾跑中打不出
+        player.setSprinting(false);
+        String result = firearm.tickShoot(player, weapon.stack(), target);
+        if (result == null) {
+            return TaskState.RUNNING;   // 这一拍没打(拉栓/换弹/冷却中),下一刻再问
+        }
+        if ("fired".equals(result)) {
+            r.strike(target.getId());
+            misfires = 0;
+        } else if (++misfires >= MAX_MISFIRES) {
+            fail("the gun did not fire: " + result, FailureType.WRONG_TOOL);
+            return TaskState.FAILED;
         }
         return TaskState.RUNNING;
     }
