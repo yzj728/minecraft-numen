@@ -1,12 +1,13 @@
 package com.dwinovo.numen.plugins.tacz;
 
 import com.dwinovo.numen.api.NumenPlugins;
+import com.dwinovo.numen.task.TaskFactory;
 import net.minecraftforge.eventbus.api.IEventBus;
 
 import java.nio.file.Path;
 
 /**
- * TACZ 联动:让同伴用上 TACZ 枪械——拿枪、朝敌人瞄准开枪、换弹、切开火模式、开镜。
+ * TACZ 联动:让同伴用上 TACZ 枪械——拿枪、朝敌人瞄准开枪、拉栓、换弹、切开火模式、开镜。
  *
  * <p>它本质是一个独立联动模组,只是被内嵌进成品 jar 一起发。所以它<b>不是</b> {@code @Mod} 入口——装没装
  * TACZ 由 {@code Builtin} 那道闸判断,判断为真才调 {@link #install}。TACZ 不在的话,这个类<b>一次都不会被加载</b>,
@@ -27,6 +28,8 @@ public final class NumenTacz {
     public static void install(IEventBus modBus, Path skillsRoot) {
         NumenPlugins.register(NAMESPACE, numen -> {
             TaczApi.install(numen);
+            // tacz.gun.shoot 派下来的开火短活由谁来跑:任务里自动拉栓、换弹、等冷却
+            TaskFactory.register(ShootRecord.class, (player, record) -> new ShootTask(record));
             if (skillsRoot != null) {
                 numen.bundleSkills(skillsRoot);
             }
