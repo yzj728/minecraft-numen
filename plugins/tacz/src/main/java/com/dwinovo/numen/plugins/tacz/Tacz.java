@@ -74,33 +74,9 @@ public final class Tacz {
         return gun == null ? -1 : gun.getCurrentAmmoCount(stack);
     }
 
-    /** 主手一把枪此刻的状态。不是枪时拿不到,调用方先判枪再问。 */
-    public record Held(@Deprecated boolean bulletInBarrel,
-                       @Deprecated boolean reloading,
-                       @Deprecated boolean bolting,
-                       @Deprecated boolean sprinting,
-                       @Deprecated long coolDownMs) {
-
-        public boolean bulletInBarrel() {
-            return bulletInBarrel;
-        }
-
-        public boolean reloading() {
-            return reloading;
-        }
-
-        public boolean bolting() {
-            return bolting;
-        }
-
-        public boolean sprinting() {
-            return sprinting;
-        }
-
-        public long coolDownMs() {
-            return coolDownMs;
-        }
-    }
+    /** 主手一把枪此刻的状态。 */
+    public record Held(boolean bulletInBarrel, boolean reloading, boolean bolting, boolean sprinting,
+                       long coolDownMs) {}
 
     /** 读主手那把枪的服务端状态:膛内子弹、换弹中、拉栓中、疾跑中、射击冷却还剩多少毫秒。不是枪返回 null。 */
     public static Held held(LivingEntity shooter, ItemStack stack) {
