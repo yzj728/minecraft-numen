@@ -7,68 +7,88 @@ import com.dwinovo.numen.entity.NumenPlayer;
 import com.dwinovo.numen.permission.Action;
 import com.dwinovo.numen.sdk.Call;
 import com.dwinovo.numen.sdk.Doc;
-import com.dwinovo.numen.sdk.EntityInfo;
 import com.dwinovo.numen.sdk.EntityRef;
 import com.dwinovo.numen.sdk.Example;
 import com.dwinovo.numen.sdk.Fn;
 import com.dwinovo.numen.sdk.Note;
-import com.dwinovo.numen.sdk.Omitted;
 import com.dwinovo.numen.sdk.Pending;
 import com.dwinovo.numen.sdk.SeeAlso;
 import com.dwinovo.numen.sdk.ServerCall;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.item.ItemStack;
 
 import java.util.List;
 import java.util.Optional;
 
 /**
- * {@code tacz.gun}:用 TACZ 枪械——现在有哪些枪、把包里的枪拿到手上、朝一只实体开枪、换弹、切开火模式、开/关瞄准。
+ * {@code tacz.gun}:用 TACZ 枪械——现在有哪些枪、把包里的枪拿到手上、朝一只实体开枪、拉栓、换弹、切开火模式、开/关瞄准。
  *
  * <p>全在服务端。开枪走 TACZ 的 {@code IGunOperator} 直接驱动同伴(服务端假玩家),不依赖客户端网络包;伤人的那一下照
  * 规矩交由权限层裁决({@code Action.attack})——要打的主人、宠物、村民那些,主人没放行就开不了这一枪,也就不会误伤。
  *
  * <p>枪是远程武器,开枪<b>不量距离、不走位</b>:打得中打不中取决于站的位置和看不看得见目标,那些由程序自己用
- * {@code numen.move.to} 与 {@code numen.scan.sight} 先办好。本组里的改装备(拿枪、换弹、瞄准)是同伴自己的装备,不问主人;
- * 只有"对谁开枪"这一件伤人,过权限层。
+ * {@code numen.move.to} 与 {@code numen.scan.sight} 先办好。本组里的改装备(拿枪、拉栓、换弹、瞄准)是同伴自己的装备,
+ * 不问主人;只有"对谁开枪"这一件伤人,过权限层。
+ *
+ * <p><b>枪是状态机</b>:TACZ 的 shoot 有一串前置检查,不满足时一枪不开、只回结果码(换弹中 is_reloading、拉栓中
+ * is_bolting、疾跑中 is_sprinting、手动枪没上膛 need_bolt、冷却 cool_down、没子弹 no_ammo、没拿枪 not_gun/not_draw)。
+ * 结果码就是给模型的下一步指令:看码把状态摆对再开下一枪,不猜、不无脑重试。
  */
 public final class TaczApi {
 
     private TaczApi() {}
 
     public static void install(NumenApi numen) {
-        numen.api("gun", "TACZ firearms: list them, take one in hand, shoot at an entity, reload, switch fire mode, aim.",
-                TaczApi.class);
+        numen.api("gun", "TACZ firearms: list them, take one in hand, shoot at an entity, work the bolt, reload, "
+                + "switch fire mode, aim.", TaczApi.class);
     }
 
-    /** 现况:有哪些枪、手上是什么。 */
-    @Doc("The TACZ guns on this pack and what you hold now.")
+    /** 现况:有哪些枪、手上是什么、枪此刻什么状态。 */
+    @Doc("The TACZ guns on this pack and the state of the gun you hold.")
     public record Options(@Doc("Every gun id TACZ knows, sorted.") List<String> guns,
                           @Doc("The gun in your main hand now; none when you hold no TACZ gun.")
                           Optional<String> mainHand,
-                          @Doc("Ammo left in the gun in your main hand; absent when you hold no TACZ gun.")
-                          Optional<Integer> ammo) {}
+                          @Doc("Rounds in the gun's magazine; absent when you hold no TACZ gun.")
+                          Optional<Integer> ammo,
+                          @Doc("Whether a round is in the chamber. A manual-action gun with none here refuses to "
+                                  + "shoot (need_bolt): work the bolt first.")
+                          Optional<Boolean> bulletInBarrel,
+                          @Doc("Whether a reload is in progress; shooting now says is_reloading.")
+                          Optional<Boolean> reloading,
+                          @Doc("Whether the bolt is being worked; shooting now says is_bolting.")
+                          Optional<Boolean> bolting,
+                          @Doc("Whether you are sprinting; shooting now says is_sprinting — stand still first.")
+                          Optional<Boolean> sprinting,
+                          @Doc("Milliseconds until the gun can fire again (0 = ready).")
+                          Optional<Long> coolDownMs) {}
 
     /**
-     * 有哪些枪、手上是什么。只读。枪 id 是装枪械包才有的清单,查一次即可;清单不写进帮助里,因为跟着装的包变。
-     * 手上拿的"是不是某把枪"能读,但枪里剩多少发只有拿在主手时读得到,而且服务端读不到弹匣之外的备弹。
+     * 有哪些枪、手上是什么、枪的状态。只读。枪 id 是装枪械包才有的清单,查一次即可。手上拿的枪能读弹匣余弹、
+     * 膛内有没有子弹、换弹/拉栓/疾跑/冷却状态;备弹(包里的弹匣/弹药盒)读不到,那是 TACZ 不告诉服务端的。
      */
-    @Fn("The TACZ guns on this pack, and what gun you hold with its ammo left.")
+    @Fn("The TACZ guns on this pack, and the state of the gun you hold: ammo, chamber, reloading, bolting, sprinting, "
+            + "shoot cool-down.")
     @Example("tacz.gun.options()")
     @Example("for _, g in ipairs(tacz.gun.options().guns) do print(g) end")
     @Note("Read-only. The ids come from the gun packs installed; pick one exactly as listed.")
     @Note("Ammo is read from the gun in hand only; TACZ does not tell the server about spare magazines.")
-    @SeeAlso({"tacz.gun.equip", "tacz.gun.shoot"})
+    @Note("Before shooting, check this: reloading or bolting means wait, sprinting means stand still, cool_down_ms "
+            + "means wait that long.")
+    @SeeAlso({"tacz.gun.equip", "tacz.gun.shoot", "tacz.gun.bolt"})
     public static Options options(ServerCall call) {
         NumenPlayer her = call.her();
-        String mainHand = null;
-        Integer ammo = null;
-        com.tacz.guns.api.item.IGun gun = com.tacz.guns.api.item.IGun.getIGunOrNull(her.getMainHandItem());
-        if (gun != null) {
-            mainHand = gun.getGunId(her.getMainHandItem()).toString();
-            ammo = gun.getCurrentAmmoCount(her.getMainHandItem());
+        ItemStack stack = her.getMainHandItem();
+        com.tacz.guns.api.item.IGun gun = com.tacz.guns.api.item.IGun.getIGunOrNull(stack);
+        if (gun == null) {
+            return new Options(Tacz.gunIds(), Optional.empty(), Optional.empty(), Optional.empty(),
+                    Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
         }
-        return new Options(Tacz.gunIds(), Optional.ofNullable(mainHand), Optional.ofNullable(ammo));
+        Tacz.Held held = Tacz.held(her, stack);
+        return new Options(Tacz.gunIds(), Optional.of(gun.getGunId(stack).toString()),
+                Optional.of(gun.getCurrentAmmoCount(stack)),
+                Optional.of(held.bulletInBarrel()), Optional.of(held.reloading()), Optional.of(held.bolting()),
+                Optional.of(held.sprinting()), Optional.of(held.coolDownMs()));
     }
 
     /** 拿哪把枪。 */
@@ -103,13 +123,18 @@ public final class TaczApi {
     /** 这一枪的结果。 */
     @Doc("What one shot did.")
     public record Fired(@Doc("The entity you shot at.") int target,
-                        @Doc("What TACZ said: success, no_ammo, cool_down, not_draw, not_gun, reloading, …")
+                        @Doc("What TACZ said: success, or why it did not fire — no_ammo, cool_down, need_bolt, "
+                                + "not_draw, not_gun, is_reloading, is_bolting, is_sprinting, overheated.")
                         String result) {}
 
     /**
      * 朝一只实体开一枪:先过权限层(攻击那只实体),放行了再算指向它的方向、交给 TACZ 开枪。
      * 不走路、不量距离——打得中打不中取决于你站哪、看不看得见;先 {@code numen.scan.sight} 确认、{@code numen.move.to}
      * 走过去,再打。
+     *
+     * <p>没开出去的结果码就是下一步:need_bolt → {@code tacz.gun.bolt} 拉栓;is_reloading/is_bolting → 等完再打;
+     * is_sprinting → 站定再打;cool_down → 等冷却;no_ammo → {@code tacz.gun.reload} 换弹;not_gun/not_draw →
+     * {@code tacz.gun.equip} 先拿枪。
      */
     @Fn("Shoot at one entity with the gun in your main hand.")
     @Example("tacz.gun.shoot(184)")
@@ -118,8 +143,9 @@ public final class TaczApi {
     @Note("Attacking asks your owner first when it should: shooting your owner's pets, named mobs or villagers is "
             + "decided by the permission layer, not by you.")
     @Note("It does not travel and does not check distance: hit or miss depends on where you stand and whether you can "
-            + "see it (numen.scan.sight). The result TACZ reports (no_ammo, cool_down, …) tells why a shot did not fire.")
-    @SeeAlso({"tacz.gun.equip", "numen.scan.sight", "numen.fight.attack"})
+            + "see it (numen.scan.sight). The result TACZ reports tells exactly why a shot did not fire — read it and "
+            + "do what it says (need_bolt means tacz.gun.bolt, no_ammo means tacz.gun.reload, …).")
+    @SeeAlso({"tacz.gun.equip", "tacz.gun.bolt", "tacz.gun.reload", "numen.scan.sight", "numen.fight.attack"})
     public static Pending<Fired> shoot(ServerCall call, Shoot args) {
         Entity target = call.entity(args.target());
         if (!(target instanceof LivingEntity living)) {
@@ -140,14 +166,24 @@ public final class TaczApi {
         });
     }
 
-    /** 换弹。 */
-    public record NoArgs() {}
+    /** 拉栓:手动枪把下一发顶上膛。 */
+    @Fn("Work the bolt of the gun in hand: chamber the next round.")
+    @Example("tacz.gun.bolt()")
+    @Note("Manual-action guns need this before the first shot (shoot says need_bolt) and after each shot. Automatic "
+            + "guns chamber on their own; working the bolt on one does nothing.")
+    @Note("It only starts the bolt; whether it finished is not reported back. Check tacz.gun.options().bolting before "
+            + "you shoot.")
+    @SeeAlso({"tacz.gun.shoot", "tacz.gun.options"})
+    public static void bolt(ServerCall call) {
+        Tacz.bolt(call.her());
+    }
 
-    /** 给主手的枪换弹。 */
+    /** 换弹。 */
     @Fn("Reload the gun in your main hand.")
     @Example("tacz.gun.reload()")
     @Note("TACZ decides whether a reload can start (ammo full, still reloading, cool-down). It only starts the reload; "
-            + "whether it finished is not reported back.")
+            + "whether it finished is not reported back — tacz.gun.options().reloading says when it is done.")
+    @Note("The client-side auto-reload setting does not apply to you (you have no client): reload is always manual.")
     @SeeAlso({"tacz.gun.shoot", "tacz.gun.options"})
     public static void reload(ServerCall call) {
         Tacz.reload(call.her());
