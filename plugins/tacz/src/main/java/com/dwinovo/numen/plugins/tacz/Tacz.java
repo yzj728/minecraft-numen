@@ -154,6 +154,12 @@ public final class Tacz {
         return op.shoot(() -> pitch, () -> yaw);
     }
 
+    /** 朝面朝方向开一枪(无目标:测试开火、盲射用),子弹沿实体当前视线飞。 */
+    public static ShootResult fire(LivingEntity shooter) {
+        IGunOperator op = IGunOperator.fromLivingEntity(shooter);
+        return op.shoot(shooter::getXRot, shooter::getYRot);
+    }
+
     public static void reload(LivingEntity shooter) {
         IGunOperator.fromLivingEntity(shooter).reload();
     }
