@@ -39,26 +39,14 @@ local foe = numen.scan.entities("hostile", {radius = 24})[1]
 
 ## 开枪:站在哪就在哪打,不用先走过去
 
-枪是远程武器,**shoot 不走路、不量距离**。正确的流程是:
+枪是远程武器,**shoot 不走路、不量距离**。正确流程很简单:
 
 ```lua
-tacz.gun.equip("tacz:ak47")            -- 1. 拿上枪
-local ok = numen.scan.sight(foe)       -- 2. 看不看得见它
-if ok.visible then
-  local shot = tacz.gun.shoot(foe)     -- 3. 看得见:原地直接打
-end
+tacz.gun.equip("tacz:ak47")      -- 1. 拿上枪
+local shot = tacz.gun.shoot(foe) -- 2. 直接打
 ```
 
-**看得见就直接打,别先 move。** 只有看不见(隔着墙、太远)才动位置:
-
-```lua
-if not ok.visible then
-  numen.move.to(foe.pos, {arrive = "near", range = 12})   -- 走近一点
-  -- 到了再 sight 一次、再 shoot
-end
-```
-
-**`tacz.gun.shoot(目标)` 一次就是完整的一发**,它自己在服务端把一切摆对:
+**别先 move。** shoot 自己会处理一切:
 
 - 手动枪膛空 → 自己拉栓再打
 - 弹匣空 → 自己换弹(前提是包里带着对应弹药)
@@ -66,10 +54,19 @@ end
 - 狙击枪 → 先开镜再打(之后连打保持开镜)
 - 冷却/换弹/拉栓中 → 等完再打
 - 疾跑中 → 自己站定
-- **身体会转向目标**——枪口朝哪,子弹往哪
+- **身体会转向目标**——枪口朝哪,子弹往哪(和原版弓战斗同一套转向)
 - **开火期间战斗与逃跑本能让开**——哪怕有僵尸正在追你,这一枪也打得出去,不会打到一半乱跑
 
-打出去返回 `result = "success"`;开不了会明确说为什么(没弹药、手上没枪),照它说的改。
+打出去返回 `result = "success"`;开不了会明确说为什么:
+
+- **"no line of sight"**:看不见目标(有墙挡着)。这时才动位置:
+  ```lua
+  local s = numen.scan.sight(foe)   -- 看是什么挡着
+  numen.move.to(foe.pos, {arrive = "near", range = 12})  -- 绕过去/走近点
+  -- 到了再 shoot 一次
+  ```
+- **"no ammo"**:包里的弹药打完了,跟主人要弹药或换枪。
+- **"no gun / not_gun"**:手上没枪,先 equip。
 
 **连发**:自动枪连打几发,就调几次 `shoot`,每次一发,等每次返回再调下一次。
 **边打边动**:一枪打完想换位置,再 `numen.move.to` 走位,然后继续 shoot——移动和开枪交替进行。
@@ -114,6 +111,5 @@ tacz.gun.aim(false)      -- 收镜
 
 - 手上没枪、背包里没枪就假装开枪
 - 看得见目标却先长途跋涉走过去——枪不用贴脸,原地打
-- 对着墙后的敌人一直射(先 numen.scan.sight,看不见才走位)
-- 同一只打不动的目标反复调 shoot——看失败原因,没弹药就是没弹药,换办法(近战/换枪/要弹药)
+- 同一只打不动的目标反复调 shoot——看失败原因,没弹药就是没弹药,没视线就换位,换办法(近战/换枪/要弹药)
 - 把开枪当成唯一手段:近处、弹药不足时,用 numen.fight.attack 近战更省
