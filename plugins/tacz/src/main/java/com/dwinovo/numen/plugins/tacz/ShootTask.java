@@ -2,6 +2,7 @@ package com.dwinovo.numen.plugins.tacz;
 
 import com.dwinovo.numen.agent.script.ErrorKind;
 import com.dwinovo.numen.entity.NumenPlayer;
+import com.dwinovo.numen.sdk.Call;
 import com.dwinovo.numen.task.Task;
 import com.dwinovo.numen.task.TaskResult;
 import com.dwinovo.numen.task.TaskState;
@@ -10,6 +11,8 @@ import com.tacz.guns.api.item.IGun;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
+
+import java.util.Map;
 
 /**
  * 打出一发:任务每刻把枪的状态机摆对,直到子弹真的出膛,或实在开不了枪。
@@ -20,9 +23,13 @@ import net.minecraft.world.item.ItemStack;
  * 没切枪就切({@code NOT_DRAW})、每步按枪械数据的耗时等足再打。这里逐条照做,只把女仆的
  * "每 N tick 再调一次"换成任务等刻度——同一套逻辑,同一个节拍。
  *
- * <h2>身体先站定、再转向,然后才扣扳机</h2>
- * 开枪需要疾跑状态清空,而且子弹方向必须和身体朝向一致(玩家看到枪口朝哪,子弹往哪)。
- * 所以每刻先把移动键松开站定、把身体与头转向目标,再问枪的状态、扣扳机。
+ * <h2>朝向与站定照 Numen 自己的弓战斗</h2>
+ * 开枪前身体站定(松键、停疾跑)、用原版 {@code lookAt(EYES)} 把身体、头、视线全转向目标——
+ * 和 Numen 弓战斗挥刀/松手那一刻做的一模一样,于是客户端看到的枪口朝向和子弹方向一致。
+ *
+ * <h2>看不见就不打,立刻说清</h2>
+ * 枪是直射弹道,中间有墙就是白打。目标不在视线里时当场失败,回执写明"看不见,先 numen.scan.sight
+ * + numen.move.to 换位再打"——不让模型对着墙反复扣扳机,也不让任务傻等。
  *
  * <h2>为什么按住战斗与逃跑两条本能</h2>
  * 同伴身上有 {@code mob_defense}(怪逼近就自动开打,按原版剑/弓逻辑走位,不认识 TACZ 枪)与
@@ -69,7 +76,13 @@ final class ShootTask implements Task {
             outcome = "no TACZ gun in your main hand; tacz.gun.equip first";
             return TaskState.FAILED;
         }
-        // 身体先站定(松开一切移动键、停掉疾跑),再转向目标:弹道和看得见的枪口朝向一致
+        // 枪是直射弹道:看不见目标就是白打,立刻失败并给下一步,别傻等也别对墙空射
+        if (!her.hasLineOfSight(living)) {
+            outcome = "no line of sight to the target — reposition first: numen.scan.sight finds what blocks the "
+                    + "way, numen.move.to walks around it, then shoot again";
+            return TaskState.FAILED;
+        }
+        // 身体先站定(松开一切移动键、停掉疾跑),再转向目标:和 Numen 弓战斗松手前那一下一致
         her.controls().releaseAll();
         her.setSprinting(false);
         Tacz.face(her, living);
@@ -83,7 +96,7 @@ final class ShootTask implements Task {
         if (held.reloading() || held.bolting() || held.coolDownMs() > 0) {
             return TaskState.RUNNING;
         }
-        // 疾跑中开不了枪(同伴寻路会疾跑):站定,下一刻再试
+        // 疾跑中开不了枪:站定,下一刻再试
         if (held.sprinting()) {
             return TaskState.RUNNING;
         }
