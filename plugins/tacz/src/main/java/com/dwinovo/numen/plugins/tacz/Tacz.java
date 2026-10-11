@@ -4,6 +4,7 @@ import com.tacz.guns.api.TimelessAPI;
 import com.tacz.guns.api.entity.IGunOperator;
 import com.tacz.guns.api.entity.ShootResult;
 import com.tacz.guns.api.item.GunTabType;
+import com.tacz.guns.api.item.IAmmo;
 import com.tacz.guns.api.item.IGun;
 import com.tacz.guns.entity.shooter.ShooterDataHolder;
 import com.tacz.guns.resource.index.CommonGunIndex;
@@ -123,6 +124,66 @@ public final class Tacz {
             }
         }
         return out;
+    }
+
+    /** 背包里有没有这杆枪的匹配弹药(弹药盒、弹匣都算——车万女仆同款的查法)。 */
+    public static boolean hasMatchingAmmo(Player player, ItemStack gunStack) {
+        for (ItemStack stack : player.getInventory().items) {
+            IAmmo ammo = IAmmo.getIAmmoOrNull(stack);
+            if (ammo != null && ammo.isAmmoOfGun(gunStack, stack)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 这把枪现在能不能打出子弹:弹匣里有弹,或背包里有匹配弹药。 */
+    public static boolean canFireGun(Player player, ItemStack stack) {
+        IGun gun = IGun.getIGunOrNull(stack);
+        if (gun == null) {
+            return false;
+        }
+        if (gun.getCurrentAmmoCount(stack) > 0) {
+            return true;
+        }
+        return hasMatchingAmmo(player, stack);
+    }
+
+    /** 背包里能开火的枪 id(按名排序去重)。 */
+    public static List<String> fireableGuns(Player player) {
+        List<String> out = new ArrayList<>();
+        for (ItemStack stack : player.getInventory().items) {
+            IGun gun = IGun.getIGunOrNull(stack);
+            if (gun != null && canFireGun(player, stack)) {
+                String id = gun.getGunId(stack).toString();
+                if (!out.contains(id)) {
+                    out.add(id);
+                }
+            }
+        }
+        out.sort(String::compareTo);
+        return out;
+    }
+
+    /**
+     * 背包里另一把能开火的枪的 id(排除 {@code exceptGunId} 那一把)。这把枪打光了、
+     * 又没带它的弹药时,换这一把接着打。没有返回 null。
+     */
+    public static String otherFireableGun(Player player, String exceptGunId) {
+        for (ItemStack stack : player.getInventory().items) {
+            IGun gun = IGun.getIGunOrNull(stack);
+            if (gun == null) {
+                continue;
+            }
+            String id = gun.getGunId(stack).toString();
+            if (id.equals(exceptGunId)) {
+                continue;
+            }
+            if (canFireGun(player, stack)) {
+                return id;
+            }
+        }
+        return null;
     }
 
     /**
