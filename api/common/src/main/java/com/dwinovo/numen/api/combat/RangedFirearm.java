@@ -38,4 +38,12 @@ public interface RangedFirearm {
      *         其他任意非空字符串 = 开不了枪的原因(没子弹、没枪……),战斗按它记哑火,连续几次就判这把枪不顶用。
      */
     String tickShoot(NumenPlayer shooter, ItemStack gun, LivingEntity target);
+
+    /**
+     * 这把枪的理想交战距离(格):战斗的走位环照它定——比这近就往后退、比这远就往前走,
+     * 目标在这个距离内有视线就原地站定开枪。喷子近、狙击远,由实现按枪型给。
+     */
+    default double engagementRange(ItemStack gun) {
+        return 16.0;
+    }
 }
