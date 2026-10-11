@@ -1,6 +1,7 @@
 package com.dwinovo.numen.core.combat;
 
 import com.dwinovo.numen.api.combat.Firearms;
+import com.dwinovo.numen.api.combat.RangedFirearm;
 import com.dwinovo.numen.entity.NumenPlayer;
 
 import net.minecraft.world.entity.Entity;
@@ -18,6 +19,9 @@ import net.minecraft.world.item.ItemStack;
  * <p><b>枪械(经 {@link Firearms} 注册)排在远程最前</b>:枪拿起就能打,不用拉弓蓄力;
  * 而且带着枪时近战让位——她是枪手不是剑客,战斗会优先拉开距离开枪,而不是切剑贴脸。
  * 逃跑判据也吃这一口:带枪就是"有武器",不会再被当赤手空拳追着跑。
+ *
+ * <p><b>枪械之间挑能开火的</b>({@link RangedFirearm#canFire}:弹匣有弹或带着匹配弹药):
+ * 两把枪只有一把带着弹时挑那把,不挑到没弹的;所有枪都没弹才轮到别的远程。
  */
 public final class Loadout {
 
@@ -59,8 +63,8 @@ public final class Loadout {
 
     /**
      * 扫一遍背包。近战按 {@link WeaponDamage#against} 对<b>这个目标</b>排序;远程按
-     * "枪械 &gt; 已上弦的弩 &gt; 弓 &gt; 未上弦的弩"挑——枪拿起就能打,上弦的弩省掉整个拉弓周期,
-     * 而弓的蓄力比给弩上弦快。带着枪时近战为 null:战斗判据会走远程,拉开距离开枪。
+     * "能开火的枪 &gt; 上弦的弩 &gt; 弓 &gt; 未上弦的弩 &gt; 没弹的枪"挑。带着枪时近战为 null:
+     * 战斗判据会走远程,拉开距离开枪。
      */
     public static Loadout forTarget(NumenPlayer player, Entity target) {
         Inventory inventory = player.getInventory();
@@ -69,6 +73,7 @@ public final class Loadout {
         Pick bow = null;
         Pick loadableCrossbow = null;
         Pick bestFirearm = null;
+        Pick fallbackFirearm = null;
 
         for (int slot = 0; slot < inventory.getContainerSize(); slot++) {
             ItemStack stack = inventory.getItem(slot);
@@ -76,7 +81,11 @@ public final class Loadout {
                 continue;
             }
             if (Firearms.isFirearm(stack)) {
-                if (bestFirearm == null) {
+                if (fallbackFirearm == null) {
+                    fallbackFirearm = new Pick(slot, stack, 0.0);
+                }
+                RangedFirearm firearm = Firearms.of(stack);
+                if (bestFirearm == null && (firearm == null || firearm.canFire(player, stack))) {
                     bestFirearm = new Pick(slot, stack, 0.0);
                 }
                 continue;
@@ -106,9 +115,10 @@ public final class Loadout {
         Pick ranged = bestFirearm != null ? bestFirearm
                 : chargedCrossbow != null ? chargedCrossbow
                 : bow != null ? bow
-                : loadableCrossbow;
+                : loadableCrossbow != null ? loadableCrossbow
+                : fallbackFirearm;
         // 有枪时近战让位:她是枪手,战斗拉开距离开枪,而不是切剑贴脸
-        Pick melee = bestFirearm != null ? null : bestMelee;
+        Pick melee = (bestFirearm != null || fallbackFirearm != null) ? null : bestMelee;
         return new Loadout(melee, ranged, ranged != null && ranged == chargedCrossbow);
     }
 }
