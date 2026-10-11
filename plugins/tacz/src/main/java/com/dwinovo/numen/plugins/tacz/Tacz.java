@@ -4,13 +4,10 @@ import com.tacz.guns.api.TimelessAPI;
 import com.tacz.guns.api.entity.IGunOperator;
 import com.tacz.guns.api.entity.ShootResult;
 import com.tacz.guns.api.item.GunTabType;
-import com.tacz.guns.api.item.IAmmo;
 import com.tacz.guns.api.item.IGun;
 import com.tacz.guns.entity.shooter.ShooterDataHolder;
 import com.tacz.guns.resource.index.CommonGunIndex;
-import net.minecraft.commands.arguments.EntityAnchorArgument;
 import net.minecraft.resources.ResourceLocation;
-import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Inventory;
@@ -36,12 +33,11 @@ import java.util.Set;
  * {@code LivingEntityMixin}),同伴是服务端假玩家({@code ServerPlayer} 是 {@code LivingEntity} 的子类),
  * 所以 {@code IGunOperator.fromLivingEntity(companion)} 直接可用。
  *
- * <h2>打法的出处:车万女仆验证过的枪械逻辑 + Numen 自己的弓战斗</h2>
- * 车万女仆(TouhouLittleMaid)的 {@code TacInnerCompat.performGunAttack} 是 TACZ 上验证过能打中的
- * 完整状态机:瞄准角公式、狙击枪开镜、拉栓、换弹、NOT_DRAW 时切枪。Numen 自己的弓战斗
- * ({@code AttackCompanionTask} / {@code RangedShot} / {@code InputDriver})则是"怎么瞄、怎么不
- * 乱跑"的验证:瞄准用原版 {@code lookAt(EYES)} 一次把偏航、俯仰、头朝向全对齐,开枪前站定
- * ({@code setSprinting(false)})。本插件两条都照搬:女仆的状态机 + Numen 的朝向。
+ * <h2>打法的出处:车万女仆验证过的枪械逻辑</h2>
+ * 车万女仆(TouhouLittleMaid)官方内置了 TACZ 兼容,它的 {@code TacInnerCompat.performGunAttack}
+ * 是<b>在真实游戏里验证过能打中</b>的完整状态机:瞄准角公式、狙击枪开镜、拉栓、换弹、
+ * NOT_DRAW 时切枪。本插件的瞄准与准备流程照它逐条对齐——女仆怎么做,同伴就怎么做,
+ * 只有"目标"和"身体"换成同伴自己。
  *
  * <h2>为什么用 {@code shoot(pitch, yaw)} 而不是带时间戳的那个</h2>
  * 带时间戳的重载要过一个 {@code SERVER_SHOOT_NETWORK_V} 的网络时钟校验,那个是给真客户端抗延迟用的;
@@ -114,78 +110,6 @@ public final class Tacz {
         return gun != null && gun.getGunId(player.getMainHandItem()).toString().equals(gunId);
     }
 
-    /** 一个玩家背包里的枪,按枪 id 数数(主手、背包、副手都算)。 */
-    public static Map<String, Integer> carriedGuns(Player player) {
-        Map<String, Integer> out = new java.util.LinkedHashMap<>();
-        for (ItemStack stack : player.getInventory().items) {
-            IGun gun = IGun.getIGunOrNull(stack);
-            if (gun != null) {
-                out.merge(gun.getGunId(stack).toString(), 1, Integer::sum);
-            }
-        }
-        return out;
-    }
-
-    /** 背包里有没有这杆枪的匹配弹药(弹药盒、弹匣都算——车万女仆同款的查法)。 */
-    public static boolean hasMatchingAmmo(Player player, ItemStack gunStack) {
-        for (ItemStack stack : player.getInventory().items) {
-            IAmmo ammo = IAmmo.getIAmmoOrNull(stack);
-            if (ammo != null && ammo.isAmmoOfGun(gunStack, stack)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** 这把枪现在能不能打出子弹:弹匣里有弹,或背包里有匹配弹药。 */
-    public static boolean canFireGun(Player player, ItemStack stack) {
-        IGun gun = IGun.getIGunOrNull(stack);
-        if (gun == null) {
-            return false;
-        }
-        if (gun.getCurrentAmmoCount(stack) > 0) {
-            return true;
-        }
-        return hasMatchingAmmo(player, stack);
-    }
-
-    /** 背包里能开火的枪 id(按名排序去重)。 */
-    public static List<String> fireableGuns(Player player) {
-        List<String> out = new ArrayList<>();
-        for (ItemStack stack : player.getInventory().items) {
-            IGun gun = IGun.getIGunOrNull(stack);
-            if (gun != null && canFireGun(player, stack)) {
-                String id = gun.getGunId(stack).toString();
-                if (!out.contains(id)) {
-                    out.add(id);
-                }
-            }
-        }
-        out.sort(String::compareTo);
-        return out;
-    }
-
-    /**
-     * 背包里另一把能开火的枪的 id(排除 {@code exceptGunId} 那一把)。这把枪打光了、
-     * 又没带它的弹药时,换这一把接着打。没有返回 null。
-     */
-    public static String otherFireableGun(Player player, String exceptGunId) {
-        for (ItemStack stack : player.getInventory().items) {
-            IGun gun = IGun.getIGunOrNull(stack);
-            if (gun == null) {
-                continue;
-            }
-            String id = gun.getGunId(stack).toString();
-            if (id.equals(exceptGunId)) {
-                continue;
-            }
-            if (canFireGun(player, stack)) {
-                return id;
-            }
-        }
-        return null;
-    }
-
     /**
      * 把背包里那把枪拿到主手,并初始化 TACZ 的射击状态。调用方保证能从背包里找到这把枪。
      * 找得到才来:找不到会静默不动作,所以调用方要先问 {@link #findGunSlot}。
@@ -218,20 +142,6 @@ public final class Tacz {
         IGunOperator.fromLivingEntity(shooter).bolt();
     }
 
-    /**
-     * 把身体、头、视线全部转向目标——和 Numen 自己的 {@code InputDriver.lookAt} 同一个原版口子:
-     * {@code lookAt(EYES)} 一次对齐偏航、俯仰、头朝向,再补上身体偏航。这样客户端渲染的枪口
-     * 朝向和子弹方向一致,不会"人朝 A 枪打 B"。
-     */
-    public static void face(LivingEntity shooter, LivingEntity target) {
-        if (shooter instanceof ServerPlayer p) {
-            p.lookAt(EntityAnchorArgument.Anchor.EYES, target.getEyePosition());
-            p.setYBodyRot(p.getYRot());
-            p.yRotO = p.getYRot();
-            p.xRotO = p.getXRot();
-        }
-    }
-
     /** 朝目标的视线方向开一枪。瞄准角照车万女仆验证过的公式,一字不改。 */
     public static ShootResult shoot(LivingEntity shooter, LivingEntity target) {
         IGunOperator op = IGunOperator.fromLivingEntity(shooter);
@@ -246,9 +156,6 @@ public final class Tacz {
 
     /** 朝面朝方向开一枪(无目标:测试开火、盲射用),子弹沿实体当前视线飞。 */
     public static ShootResult fire(LivingEntity shooter) {
-        // 视线以 yRot/xRot 为准;把身体与头对齐到视线,弹道才和看得见的朝向一致
-        shooter.setYBodyRot(shooter.getYRot());
-        shooter.setYHeadRot(shooter.getYRot());
         IGunOperator op = IGunOperator.fromLivingEntity(shooter);
         return op.shoot(shooter::getXRot, shooter::getYRot);
     }

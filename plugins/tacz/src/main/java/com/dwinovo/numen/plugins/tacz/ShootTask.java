@@ -11,8 +11,6 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 
-import java.util.Locale;
-
 /**
  * 打出一发:任务每刻把枪的状态机摆对,直到子弹真的出膛,或实在开不了枪。
  *
@@ -22,26 +20,12 @@ import java.util.Locale;
  * 没切枪就切({@code NOT_DRAW})、每步按枪械数据的耗时等足再打。这里逐条照做,只把女仆的
  * "每 N tick 再调一次"换成任务等刻度——同一套逻辑,同一个节拍。
  *
- * <h2>不设门槛:朝任何实体、任何距离直接开枪(第一版验证过的行为)</h2>
- * 这里没有视线门、没有距离门——牛、羊、天上飞的、任何有权限的目标,瞄准就打。第一版就是
- * 这个形状,当时能打中立生物、能打天上的;后来加的门槛把这两个能力弄丢了。子弹打出去之后
- * 是打中、打死还是被挡下,由 6 刻后的血量对比照实告诉模型,不用事前拒绝。
- *
- * <h2>回执是实话:打出去 ≠ 打中</h2>
- * 开枪 6 刻后对比目标的血量,把真相说给模型:打中(hp 变化)、打死、还是打出去但没接上。
- * 模型不用再猜"是不是没弹药"——弹药看 {@code options().fireable},打没打中看回执。TACZ 的
- * {@code ShootResult.SUCCESS} 只保证子弹已经生成,子弹飞出去之后有没有接上是弹道的事。
- *
- * <h2>这把枪没弹,换一把接着打</h2>
- * 手上这把枪弹匣空、包里又没有它的匹配弹药时,先看背包里有没有另一把能开火的枪——有就换过去
- * 继续打(喷子打光换狙),不把"没弹药"当最终失败。真的一把都打不了,才失败并说清缺什么。
- *
  * <h2>为什么按住战斗与逃跑两条本能</h2>
  * 同伴身上有 {@code mob_defense}(怪逼近就自动开打,按原版剑/弓逻辑走位,不认识 TACZ 枪)与
  * {@code flee}(判定为空手或扛不住就被追着跑,同样不认识枪)两条反射链,优先级都高于同步短活。
  * 它们一抢身体,开火任务就永远轮不到,枪自然开不出来——"遇敌乱跑、开不了枪"正是它们干的。
- * 派发那一刻(TaczApi.shoot)就已经按住,这里每刻再按一次兜底。任务一结束,空闲时由引擎
- * 统一解除,不用显式还。
+ * 官方 {@code attack} 任务开工时按住 {@code mob_defense} 是同一条路;这里把两条都按住:
+ * 开火的这几刻身体归这个任务,本能不抢。任务一结束,空闲时由引擎统一解除,不用显式还。
  */
 final class ShootTask implements Task {
 
@@ -50,24 +34,15 @@ final class ShootTask implements Task {
     /** 逃跑链的名字(见 core 的 {@code FleeChain.ID})。 */
     private static final String FLEE = "flee";
 
-    /** 开枪后等几刻再对比目标血量(子弹飞行+伤害结算的余量)。 */
-    private static final int HIT_CHECK_TICKS = 6;
-
     private final ShootRecord r;
     /** 走到终态时说给模型听的那句话。 */
     private String outcome = "";
-    /** 已经对当前手上这把枪试过换弹。再弹 NO_AMMO 就是包里真的没有对应弹药,换枪或判死。 */
+    /** 已经试过换弹。再弹 NO_AMMO 就是包里真的没有对应弹药,判死,别在换弹和空射之间死循环。 */
     private boolean reloadTried;
     /** 上一拍安排的等待(开镜、拉栓的耗时):到这个游戏刻之前什么也不做。 */
     private long waitUntil = -1;
     /** 最后一次射击的结果码(失败时带回去)。 */
     private String lastResult;
-    /** 开枪那一刻的游戏刻;没开过枪是 -1。命中验证在它之后 HIT_CHECK_TICKS 刻结算。 */
-    private int firedAtTick = -1;
-    /** 开枪那一刻目标的血量,拿来和 6 刻后的血量比。 */
-    private float healthBefore;
-    /** 目标的名字(打死了也说得出是谁)。 */
-    private String targetName = "the target";
 
     ShootTask(ShootRecord record) {
         this.r = record;
@@ -80,24 +55,9 @@ final class ShootTask implements Task {
         her.pauseReflex(FLEE);
 
         Entity found = her.serverLevel().getEntity(r.targetId);
-        if (!(found instanceof LivingEntity living)) {
-            // 开过枪之后目标没了:这一发多半把它打死了,照实说
-            if (firedAtTick >= 0) {
-                firedAtTick = -1;
-                outcome = "fired and killed " + targetName;
-                lastResult = "killed";
-                return TaskState.SUCCESS;
-            }
+        if (!(found instanceof LivingEntity living) || !living.isAlive()) {
             outcome = "the target is gone (died or left) before a shot went off";
             return TaskState.FAILED;
-        }
-        if ("the target".equals(targetName)) {
-            targetName = living.getName().getString();
-        }
-        long now = her.serverLevel().getGameTime();
-        // 命中验证:开枪 6 刻后对比目标血量,给模型一句实话——这是回执,别被任何等待盖过去
-        if (firedAtTick >= 0 && now >= firedAtTick + HIT_CHECK_TICKS) {
-            return settleHit(living);
         }
         ItemStack stack = her.getMainHandItem();
         IGun gun = IGun.getIGunOrNull(stack);
@@ -105,11 +65,7 @@ final class ShootTask implements Task {
             outcome = "no TACZ gun in your main hand; tacz.gun.equip first";
             return TaskState.FAILED;
         }
-        // 身体先站定(松开一切移动键、停掉疾跑),再转向目标:和 Numen 弓战斗松手前那一下一致。
-        // 没有视线门、没有距离门:朝目标直接打,打不打得着由子弹自己说。
-        her.controls().releaseAll();
-        her.setSprinting(false);
-        Tacz.face(her, living);
+        long now = her.serverLevel().getGameTime();
         // 开镜/拉栓的耗时还没走完:等着
         if (now < waitUntil) {
             return TaskState.RUNNING;
@@ -119,23 +75,24 @@ final class ShootTask implements Task {
         if (held.reloading() || held.bolting() || held.coolDownMs() > 0) {
             return TaskState.RUNNING;
         }
-        // 疾跑中开不了枪:站定,下一刻再试
+        // 疾跑中开不了枪(同伴寻路会疾跑):站定,下一刻再试
         if (held.sprinting()) {
+            her.setSprinting(false);
             return TaskState.RUNNING;
         }
         ShootResult shot = Tacz.shoot(her, living);
-        lastResult = shot.name().toLowerCase(Locale.ROOT);
+        lastResult = shot.name().toLowerCase(java.util.Locale.ROOT);
         switch (shot) {
             case SUCCESS -> {
-                // 子弹已经出膛(SUCCESS 就代表子弹生成了)。记下这一拍的血量,6 刻后对比出真相;
-                // 狙击枪顺带把开镜留给下一次(保持开镜,连打一直准)。
-                firedAtTick = (int) now;
-                healthBefore = living.getHealth();
+                // 女仆的打法:狙击枪必须开镜再打——不开镜散布大,基本打不中。这一发已经出膛
+                // 就算完成,开镜留给下一次(保持开镜状态,狙击枪连打就一直是准的)。
                 if (Tacz.isSniper(stack) && !Tacz.isAiming(her)) {
                     Tacz.aim(her, true);
                     waitUntil = now + Tacz.waitTicks(Tacz.aimTimeSeconds(stack));
+                    return TaskState.RUNNING;
                 }
-                return TaskState.RUNNING;
+                outcome = "fired at " + living.getName().getString();
+                return TaskState.SUCCESS;
             }
             case NEED_BOLT -> {
                 // 手动枪膛空、弹匣有弹:拉栓顶上膛,按枪的拉栓耗时等足再打
@@ -144,24 +101,14 @@ final class ShootTask implements Task {
                 return TaskState.RUNNING;
             }
             case NO_AMMO -> {
-                if (!reloadTried) {
-                    reloadTried = true;
-                    // 换弹只会"开始",换没换完由下一刻的 held.reloading 看;换不起来就是没弹药
-                    Tacz.reload(her);
-                    return TaskState.RUNNING;
+                if (reloadTried) {
+                    outcome = "no ammo, and reloading did not feed new rounds — you carry no matching ammo";
+                    return TaskState.FAILED;
                 }
-                // 这把枪弹匣空、又没有它的匹配弹药:换一把能开火的枪接着打
-                String gunId = gun.getGunId(stack).toString();
-                String other = Tacz.otherFireableGun(her, gunId);
-                if (other != null) {
-                    Tacz.equip(her, other);
-                    reloadTried = false;
-                    waitUntil = now + 10;   // 换枪让几刻切枪动作
-                    return TaskState.RUNNING;
-                }
-                outcome = "no_ammo: the gun " + gunId + " is empty and you carry no matching ammo, and no other "
-                        + "gun you carry can fire either — ask your owner for ammo";
-                return TaskState.FAILED;
+                reloadTried = true;
+                // 换弹只会"开始",换没换完由下一刻的 held.reloading 看;换不起来就是没弹药
+                Tacz.reload(her);
+                return TaskState.RUNNING;
             }
             case NOT_DRAW -> {
                 // 枪没登记成当前操作对象:切枪,女仆的同款处理
@@ -183,33 +130,6 @@ final class ShootTask implements Task {
         }
     }
 
-    /** 命中验证:对比开枪前后的血量,把真相说给模型。 */
-    private TaskState settleHit(LivingEntity living) {
-        firedAtTick = -1;
-        if (living.isDeadOrDying()) {
-            outcome = "fired and killed " + targetName;
-            lastResult = "killed";
-            return TaskState.SUCCESS;
-        }
-        if (living.getHealth() < healthBefore) {
-            outcome = "fired and hit " + targetName + " (hp " + fmt(healthBefore) + " → " + fmt(living.getHealth())
-                    + ")";
-            lastResult = "hit";
-            return TaskState.SUCCESS;
-        }
-        // 子弹确实打出去了,但没接上:可能它挪了、超出有效射程、或者中间有东西挡着。
-        // 这是距离/弹道的事,不是弹药的事——枪没问题,走近一点再打。
-        outcome = "fired at " + targetName + " but the shot did not connect — it may have moved, be beyond the "
-                + "gun's effective range, or something blocked the line. Move closer or check numen.scan.sight, "
-                + "then shoot again. The gun is fine: see tacz.gun.options().fireable for ammo status";
-        lastResult = "missed";
-        return TaskState.FAILED;
-    }
-
-    private static String fmt(float value) {
-        return String.format(Locale.ROOT, "%.1f", value);
-    }
-
     /** 不占身体之外的资源,丢了身体没有要收拾的。 */
     @Override
     public void stop(NumenPlayer companion, StopReason why) {}
@@ -217,8 +137,7 @@ final class ShootTask implements Task {
     @Override
     public TaskResult result(TaskState terminal) {
         return switch (terminal) {
-            case SUCCESS -> TaskResult.ok(outcome, new TaczApi.Fired(r.targetId,
-                    lastResult == null ? "success" : lastResult));
+            case SUCCESS -> TaskResult.ok(outcome, new TaczApi.Fired(r.targetId, "success"));
             case TIMEOUT -> TaskResult.timeout("could not get a shot off in time — the gun stayed busy (reloading, "
                     + "bolting or on cool-down) the whole while");
             case CANCELLED -> TaskResult.cancelled("stopped before the shot went off");
