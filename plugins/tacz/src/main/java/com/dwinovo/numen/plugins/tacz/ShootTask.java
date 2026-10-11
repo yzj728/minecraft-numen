@@ -22,6 +22,11 @@ import java.util.Locale;
  * 没切枪就切({@code NOT_DRAW})、每步按枪械数据的耗时等足再打。这里逐条照做,只把女仆的
  * "每 N tick 再调一次"换成任务等刻度——同一套逻辑,同一个节拍。
  *
+ * <h2>不设门槛:朝任何实体、任何距离直接开枪(第一版验证过的行为)</h2>
+ * 这里没有视线门、没有距离门——牛、羊、天上飞的、任何有权限的目标,瞄准就打。第一版就是
+ * 这个形状,当时能打中立生物、能打天上的;后来加的门槛把这两个能力弄丢了。子弹打出去之后
+ * 是打中、打死还是被挡下,由 6 刻后的血量对比照实告诉模型,不用事前拒绝。
+ *
  * <h2>回执是实话:打出去 ≠ 打中</h2>
  * 开枪 6 刻后对比目标的血量,把真相说给模型:打中(hp 变化)、打死、还是打出去但没接上。
  * 模型不用再猜"是不是没弹药"——弹药看 {@code options().fireable},打没打中看回执。TACZ 的
@@ -100,13 +105,8 @@ final class ShootTask implements Task {
             outcome = "no TACZ gun in your main hand; tacz.gun.equip first";
             return TaskState.FAILED;
         }
-        // 枪是直射弹道:看不见目标就是白打,立刻失败并给下一步,别傻等也别对墙空射
-        if (!her.hasLineOfSight(living)) {
-            outcome = "no line of sight to the target — reposition first: numen.scan.sight finds what blocks the "
-                    + "way, numen.move.to walks around it, then shoot again";
-            return TaskState.FAILED;
-        }
-        // 身体先站定(松开一切移动键、停掉疾跑),再转向目标:和 Numen 弓战斗松手前那一下一致
+        // 身体先站定(松开一切移动键、停掉疾跑),再转向目标:和 Numen 弓战斗松手前那一下一致。
+        // 没有视线门、没有距离门:朝目标直接打,打不打得着由子弹自己说。
         her.controls().releaseAll();
         her.setSprinting(false);
         Tacz.face(her, living);
@@ -197,7 +197,8 @@ final class ShootTask implements Task {
             lastResult = "hit";
             return TaskState.SUCCESS;
         }
-        // 子弹确实打出去了,但没接上:可能它挪了、超出有效射程、或者中间有东西挡着
+        // 子弹确实打出去了,但没接上:可能它挪了、超出有效射程、或者中间有东西挡着。
+        // 这是距离/弹道的事,不是弹药的事——枪没问题,走近一点再打。
         outcome = "fired at " + targetName + " but the shot did not connect — it may have moved, be beyond the "
                 + "gun's effective range, or something blocked the line. Move closer or check numen.scan.sight, "
                 + "then shoot again. The gun is fine: see tacz.gun.options().fireable for ammo status";
