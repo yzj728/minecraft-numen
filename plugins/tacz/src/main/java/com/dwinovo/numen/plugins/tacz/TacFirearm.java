@@ -13,9 +13,9 @@ import net.minecraft.commands.arguments.EntityAnchorArgument;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.Locale;
-import java.util.Set;
+import java.util.Map;
 
 /**
  * 把 TACZ 枪接进 Numen 自己的战斗系统(经 {@link Firearms} 登记)。登记之后,{@code Loadout}
@@ -37,8 +37,8 @@ import java.util.Set;
  */
 final class TacFirearm implements RangedFirearm {
 
-    /** 已经对谁试过换弹、仍然没弹——再报 no_ammo 就真没有,别在换弹和空射之间死循环。 */
-    private final Set<Integer> reloadTried = new HashSet<>();
+    /** 已经对谁、对哪把枪试过换弹仍然没弹——再报 no_ammo 就真没有。按枪 id 记,换枪就重新武装。 */
+    private final Map<Integer, String> reloadTried = new HashMap<>();
 
     @Override
     public boolean isFirearm(ItemStack stack) {
@@ -76,13 +76,19 @@ final class TacFirearm implements RangedFirearm {
     }
 
     @Override
+    public boolean canFire(NumenPlayer shooter, ItemStack gun) {
+        return Tacz.canFireGun(shooter, gun);
+    }
+
+    @Override
     public String tickShoot(NumenPlayer shooter, ItemStack gun, LivingEntity target) {
         ItemStack hand = shooter.getMainHandItem();
         IGun iGun = IGun.getIGunOrNull(hand);
         if (iGun == null) {
             return "not_gun";
         }
-        // 弹匣里又有弹了,就重新武装换弹判据
+        String gunId = iGun.getGunId(hand).toString();
+        // 弹匣里又有弹了,就重新武装这把枪的换弹判据
         if (iGun.getCurrentAmmoCount(hand) > 0) {
             reloadTried.remove(shooter.getId());
         }
@@ -130,11 +136,12 @@ final class TacFirearm implements RangedFirearm {
                 return null;
             }
             case NO_AMMO -> {
-                if (reloadTried.contains(shooter.getId())) {
-                    return "no_ammo";
+                if (gunId.equals(reloadTried.get(shooter.getId()))) {
+                    // 这把枪换过一次弹还是没弹:真的没有匹配弹药,报出去让战斗换枪或收场
+                    return "no_ammo for " + gunId;
                 }
-                reloadTried.add(shooter.getId());
-                // 换弹只会"开始",换没换完由下一拍的 reloadStateType 看
+                reloadTried.put(shooter.getId(), gunId);
+                // 换弹只会"开始",换没换完由下一拍的 reloadStateType 看;找不到弹药就换不起来
                 op.reload();
                 return null;
             }
