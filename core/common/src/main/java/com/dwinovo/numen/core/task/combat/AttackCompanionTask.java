@@ -26,6 +26,8 @@ import com.dwinovo.numen.permission.Permission;
 import com.dwinovo.numen.permission.Verdict;
 import com.dwinovo.numen.task.Preparation;
 import com.dwinovo.numen.task.TaskState;
+import com.dwinovo.numen.api.combat.Firearms;
+import com.dwinovo.numen.api.combat.RangedFirearm;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -52,7 +54,20 @@ import com.dwinovo.numen.pathing.body.BodyCompat;
  *
  * <h2>三套武器学,一个判据</h2>
  * 挥击(冷却与无敌帧)、射击(弹道与拉弓)、躲避(势场),各自是真正不同的东西;
- * 选哪一套则只有一处判据 {@link AttackPlan},本能链用的也是同一处。
+ * 选哪一套则只有一处判据 {@link AttackPlan},本能链用的也是同一处。枪械(经 {@link Firearms}
+ * 注册)走远程那一套:拿起就打,不用拉弓,状态机(拉栓/换弹/开镜/冷却)由枪械插件自己摆。
+ *
+ * <h2>枪的战斗环是枪自己的</h2>
+ * 弓的环固定在 8~12 格(拉弓要时间、箭有效距离短)。枪不用拉弓,交战距离按枪型给
+ * ({@link RangedFirearm#engagementRange}:喷子近、狙击远)——目标在射程内<b>且有视线</b>就
+ * 原地站定开枪,环只有在她贴得太近或打不着时才把她挪开。于是"看见就打",不用先挨一下。
+ * <b>天上飞的目标例外</b>:走位环追不到它,所以飞行目标不受距离门拦——多远都开枪,
+ * 子弹伤害随距离衰减,TACZ 自己算。
+ *
+ * <h2>回执带上武器:模型知道自己开过枪</h2>
+ * 用枪打过的仗,收尾回执写明"是我用枪打的、开了几枪"——自卫本能(它派的就是这场仗)把这句话
+ * 转告模型后,模型就明白怪是它开枪打死的,而不是"突然死了"。枪手也不挥拳:拿枪贴脸挥击只会
+ * 把目标惊跑,开枪才是这场仗的事。
  *
  * <h2>会炸的东西</h2>
  * 爬行者<b>引信点着之前就是一只普通怪</b>:她够得着 4 格、它 3 格才点火,中间那条一格宽的带
@@ -125,6 +140,17 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
     private AttackPlan.Action lastLoggedAction;
     /** 上一刻的决定。判据靠它做迟滞与承诺,见 {@link AttackPlan#decide}。 */
     private AttackPlan.Move lastMove;
+
+    /**
+     * 这一刻远程战斗的环:弓是固定的 {@link #BOW_MIN_DISTANCE}~{@link #BOW_MAX_DISTANCE},
+     * 枪按枪型给({@link RangedFirearm#engagementRange} 的 0.5 倍到 1.0 倍)。走位与射程判据
+     * 都问这两个数,不各写各的。
+     */
+    private double ringInner = BOW_MIN_DISTANCE;
+    private double ringOuter = BOW_MAX_DISTANCE;
+
+    /** 这场仗开过枪(经 {@link Firearms} 的枪械)。回执里带上它,模型才知道怪是谁打死的。 */
+    private boolean usedFirearm;
 
     public AttackCompanionTask(NumenPlayer player, AttackTaskRecord record) {
         super(player, record);
@@ -521,11 +547,18 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
      * 动作,那时判据给的目标是"全场"、任务里的 {@code target} 是空 —— 手里那把剑等于不存在。
      * 实测她躲的时候一刀不还。
      *
+     * <p><b>枪手不挥拳</b>:远程武器是枪时这里直接让位——拿枪贴脸挥击只会把目标惊跑,
+     * 开枪才是这场仗的事。
+     *
      * @param field 这一刻的局面,复用 onTick 已经扫好的那份
      */
     private void tickWeapon(Battlefield field) {
         if (player.isUsingItem() && !shieldRaised()) {
             return;   // 正在拉弓或吃东西,别打断
+        }
+        Loadout loadout = Loadout.forTarget(player, player);
+        if (loadout.ranged() != null && Firearms.isFirearm(loadout.ranged().stack())) {
+            return;   // 枪手不挥拳:手里是枪,贴脸挥击只会惊跑目标,开枪才是这场仗的事
         }
         // <b>举着盾照样挥刀</b> —— 原版这两件事不冲突。这条守卫本意是拦"正在拉弓",
         // 却写成了"手上用着任何东西";副手多了一面盾之后,它把攻击层整个锁死:
@@ -533,7 +566,6 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         // 武器是<b>可选的</b>:拳头一点伤害,鸡四血、羊八血、牛十血,照样打得动。
         // 这里曾经"没有近战武器就直接返回" —— 那是按"打怪"写的前提(赤手对上会还手的
         // 东西不是出路),模型让她打一只鸡时那个前提不成立,她会走到跟前站着不动。
-        Loadout loadout = Loadout.forTarget(player, player);
         Feet here = Feet.of(player);
         if (here == null) {
             return;   // 悬在半空:没有站着的那一格,够不够得着无从按站位判
@@ -589,7 +621,18 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         // <b>两层并行</b>:脚一直在走位,手一直在拉弓。原版拉弓时本来就能走(只是慢),
         // 是我在 shootAt 里主动 halt 的 —— 于是每刻建一次导航、拆一次,看着像被打断。
         driveApproach();
-        return shootAt(Loadout.forTarget(player, target));
+        Loadout loadout = Loadout.forTarget(player, target);
+        // 先按这一刻的武器把环定下来:弓是固定的 8~12,枪按枪型给(喷子近、狙击远)
+        Loadout.Pick ranged = loadout.ranged();
+        if (ranged != null && Firearms.isFirearm(ranged.stack())) {
+            RangedFirearm firearm = Firearms.of(ranged.stack());
+            ringOuter = firearm == null ? 16.0 : firearm.engagementRange(ranged.stack());
+            ringInner = Math.max(4.0, ringOuter * 0.5);
+        } else {
+            ringInner = BOW_MIN_DISTANCE;
+            ringOuter = BOW_MAX_DISTANCE;
+        }
+        return shootAt(loadout);
     }
 
 
@@ -656,18 +699,19 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
 
     /**
      * 走位环的外沿,按离它的中心距:剑是够到距离({@link Swing#reachTo},用来判内沿还剩不剩一条带、打站位日志;剑的环本身由
-     * {@link #reachOf} 判),弓是 {@link #BOW_MAX_DISTANCE}。
+     * {@link #reachOf} 判),弓是固定的 12 格,枪是枪型给的交战距离。
      */
     private double skirmishOuter() {
-        return bowFighting ? BOW_MAX_DISTANCE : reachToTarget();
+        return bowFighting ? ringOuter : reachToTarget();
     }
 
     /**
-     * 走位环的内沿:剑是"它够得着我",弓是"拉得开弓的距离"。它够得比她的外沿还远(大史莱姆、点着的苦力怕)时,
-     * 打得着又挨不着的那条带本来就不存在,内沿归零:环退成"走进够得着的地方"。
+     * 走位环的内沿:剑是"它够得着我",弓是"拉得开弓的距离",枪是交战距离的一半(比这近就往后退)。
+     * 它够得比她的外沿还远(大史莱姆、点着的苦力怕)时,打得着又挨不着的那条带本来就不存在,内沿归零:
+     * 环退成"走进够得着的地方"。
      */
     private double skirmishInner() {
-        double inner = bowFighting ? BOW_MIN_DISTANCE
+        double inner = bowFighting ? ringInner
                 : target == null ? 0.0 : Menace.rawDangerRadius(target, player);
         return inner < skirmishOuter() ? inner : 0.0;
     }
@@ -744,7 +788,7 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         // 同一套站位坐标。走位说到了,攻击层就挥得出去;它挪出去了,这一格就不再算到,下一趟接着往前走。
         //
         // 内沿用<b>裸</b>攻击距离(2.02),不加格量化补偿,从格心量到它此刻的位置。带宽约 1.28 格,比格量化误差
-        // 0.71 宽出一截。弓的环在 8~12 格,问的是拉不拉得开弓,按它所在的那一列量。
+        // 0.71 宽出一截。远程的环问的是拉不拉得开弓/打不打得到,按它所在的那一列量。
         Goal ring = bowFighting
                 ? Goals.within(Goals.column(target.getBlockX(), target.getBlockZ()), skirmishInner(), skirmishOuter())
                 : swordRing();
@@ -754,10 +798,10 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         if (others.isEmpty()) {
             return ring;
         }
-        // 弓那一套的内沿对<b>每一只</b>都成立:她要跟所有怪保持五格,不只是当前目标。
+        // 远程那一套的内沿对<b>每一只</b>都成立:她要跟所有怪保持交战内沿,不只是当前目标。
         List<Threat> keepOff = bowFighting
                 ? others.stream()
-                        .map(t -> new Threat(t.x(), t.y(), t.z(), Math.max(t.radius(), BOW_MIN_DISTANCE)))
+                        .map(t -> new Threat(t.x(), t.y(), t.z(), Math.max(t.radius(), skirmishInner())))
                         .toList()
                 : others;
         return Goals.allOf(List.of(ring, Goals.awayFrom(keepOff)));
@@ -789,12 +833,16 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         if (weapon == null) {
             return closeIn();   // 弓没了:回去走位,别放弃这只
         }
+        // 枪械:拿起就打,不用拉弓——每刻让枪械插件摆状态、能打就开一枪
+        if (Firearms.isFirearm(weapon.stack())) {
+            return shootFirearm(weapon);
+        }
         // <b>攻击层不管距离。</b>射程之内就射,拉开是寻路的事(环的内沿 BOW_MIN_DISTANCE)。
         //
         // 这里曾经"近于内沿就 abortShot":僵尸一走进八格,拉到一半的弓当场取消;她退开、
         // 重新起手、僵尸又跟进来 —— 一箭都放不出去。距离是走位的判据,混进攻击层就成了
         // 一个把自己打断的开关。
-        if (player.distanceTo(target) > BOW_MAX_DISTANCE) {
+        if (player.distanceTo(target) > ringOuter) {
             return TaskState.RUNNING;   // 射程外:不放,但<b>也不取消</b>,弓接着拉
         }
         boolean crossbow = RangedShot.isCrossbow(weapon);
@@ -811,7 +859,7 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         // 就能走。这里曾经 stopNav() + halt(),而 bowFight 上一行刚 driveApproach() 建好
         // 导航,于是每刻建一次拆一次,箭一直拉不满。
         // <b>只在快松手那一刻转过去。</b>原版的箭朝哪飞只看松手那一刻的视线,拉弓的十几刻
-        // 里瞄不瞄没有区别 —— 而每刻转向会把脚带偏(移动按朝向投影),她就一路走进目标脸上。
+        // 里瞄不瞄没有区别 —— 而每刻转向会把脚带偏(移动是按朝向投影),她就一路走进目标脸上。
         // 挥刀早就是这么做的,弓这一支一直没跟上。
         if (shot != null && shot.aboutToRelease()) {
             InputDriver.lookAt(player, aim.lookPoint());
@@ -842,6 +890,54 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
                 fail("the bow or crossbow did not launch an arrow", FailureType.WRONG_TOOL);
                 return TaskState.FAILED;
             }
+        }
+        return TaskState.RUNNING;
+    }
+
+    /**
+     * 枪械路径:枪不用拉弓蓄力,每刻让枪械插件(经 {@link Firearms})摆状态、能打就开一枪。
+     * <b>目标在射程内且有视线,就原地开枪</b>——走位环只在她贴得太近、太远或看不见时才挪她。
+     * <b>飞行目标不受距离门拦</b>:走位环追不到天上飞的东西,所以它不落地就多远都开枪
+     * (子弹伤害随距离衰减,TACZ 自己算)。朝向在开火那一拍由插件自己转。
+     */
+    private TaskState shootFirearm(Loadout.Pick weapon) {
+        // 枪只能打活物(末影水晶这类不是 LivingEntity 的走原版近战路径)
+        if (!(target instanceof LivingEntity livingTarget)) {
+            return closeIn();
+        }
+        double distance = player.distanceTo(target);
+        // 地面目标按交战环靠近了再打(走位环会带她过去);天上飞的下不来,多远都打——
+        // 这是"能打天上的"那一条,第一版就有这个能力。
+        if (distance > ringOuter && target.onGround()) {
+            return TaskState.RUNNING;
+        }
+        // 看不见就打不着:让走位层去找位置,别对墙空射
+        if (!player.hasLineOfSight(livingTarget)) {
+            return TaskState.RUNNING;
+        }
+        RangedFirearm firearm = Firearms.of(weapon.stack());
+        if (firearm == null) {
+            return closeIn();   // 枪被换掉了:回去走位
+        }
+        // 换枪到手(和弓一样:这一刻只换手)
+        ItemStack before = player.getMainHandItem();
+        Hotbar.hold(player, weapon.slot());
+        if (player.getMainHandItem() != before) {
+            return TaskState.RUNNING;
+        }
+        // 站定:枪和弓一样,疾跑中打不出
+        player.setSprinting(false);
+        String result = firearm.tickShoot(player, weapon.stack(), livingTarget);
+        if (result == null) {
+            return TaskState.RUNNING;   // 这一拍没打(拉栓/换弹/冷却中),下一刻再问
+        }
+        if ("fired".equals(result)) {
+            r.strike(target.getId());
+            usedFirearm = true;
+            misfires = 0;
+        } else if (++misfires >= MAX_MISFIRES) {
+            fail("the gun did not fire: " + result, FailureType.WRONG_TOOL);
+            return TaskState.FAILED;
         }
         return TaskState.RUNNING;
     }
@@ -893,6 +989,17 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
                 : r.defeated().size() + "/" + r.entityIds.size() + " requested entities";
     }
 
+    /**
+     * 用枪打过,回执就写明:模型因此知道自己开过枪、怪是谁打死的——自卫本能把这句话转告它,
+     * 它就不会以为"怪突然死了"。
+     */
+    private String gunNote() {
+        if (!usedFirearm) {
+            return "";
+        }
+        return " — I shot with my gun (" + r.strikes() + " shot" + (r.strikes() == 1 ? "" : "s") + ")";
+    }
+
     /** 打倒了什么,它掉的东西留在地上:捡是 {@code numen.work.collect} 的事。 */
     private String drops() {
         return r.defeated().isEmpty() ? "" : "; what they dropped lies on the ground: `numen.work.collect()` picks it up";
@@ -902,21 +1009,22 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
     protected String successMessage() {
         String refusedNote = r.refused().isEmpty() ? "" : "; left alone: " + refusedSummary();
         if (r.indiscriminate) {
-            return "fought off " + tally() + "; nothing is coming after you any more" + refusedNote + drops();
+            return "fought off " + tally() + "; nothing is coming after you any more" + gunNote() + refusedNote
+                    + drops();
         }
         int incomplete = r.lost().size() + r.unreachable().size();
         return "defeated " + tally()
                 + (incomplete == 0 ? "" : " (" + incomplete + " targets could not be completed)")
-                + refusedNote + drops();
+                + gunNote() + refusedNote + drops();
     }
 
     @Override
     protected String timeoutMessage() {
-        return "attack timed out after defeating " + tally();
+        return "attack timed out after defeating " + tally() + gunNote();
     }
 
     @Override
     protected String cancelledMessage() {
-        return "attack interrupted after defeating " + tally();
+        return "attack interrupted after defeating " + tally() + gunNote();
     }
 }
