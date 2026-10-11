@@ -23,8 +23,8 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * {@code tacz.gun}:用 TACZ 枪械——现在有哪些枪、背包里带着哪几把、把枪拿到手上、朝一只实体开枪、朝面朝方向开枪、拉栓、
- * 换弹、切开火模式、开/关瞄准。
+ * {@code tacz.gun}:用 TACZ 枪械——现在有哪些枪、背包里带着哪几把、哪几把能开火、把枪拿到手上、朝一只实体开枪、
+ * 朝面朝方向开枪、拉栓、换弹、切开火模式、开/关瞄准。
  *
  * <p>全在服务端。开枪走 TACZ 的 {@code IGunOperator} 直接驱动同伴(服务端假玩家),不依赖客户端网络包;伤人的那一下照
  * 规矩交由权限层裁决({@code Action.attack})——要打的主人、宠物、村民那些,主人没放行就开不了这一枪,也就不会误伤。
@@ -34,9 +34,9 @@ import java.util.Optional;
  * 这一件伤人,过权限层。
  *
  * <p><b>shoot 是一段自动的开火短活</b>,状态机照车万女仆验证过的枪械逻辑逐条对齐:手动枪膛空就拉栓、弹匣空就换弹、
- * 没切枪就切枪、狙击枪先开镜、等冷却/换弹/拉栓收尾、疾跑就站定——直到子弹出膛,或实在开不了枪(没弹药、枪不在手上)。
- * 派发那一刻就按住战斗与逃跑两条本能,开火期间身体不被抢、不乱跑。模型不必逐码处理,一次调用拿最终结果。手动
- * bolt/reload/aim 仍然单独暴露,供精细控制。
+ * 没切枪就切枪、狙击枪先开镜、等冷却/换弹/拉栓收尾、疾跑就站定——直到子弹出膛,或实在开不了枪。手上这把枪没弹、
+ * 又没有匹配弹药时,自动换背包里另一把能开火的枪接着打。派发那一刻就按住战斗与逃跑两条本能,开火期间身体不被抢、
+ * 不乱跑。模型不必逐码处理,一次调用拿最终结果。手动 bolt/reload/aim 仍然单独暴露,供精细控制。
  */
 public final class TaczApi {
 
@@ -48,16 +48,20 @@ public final class TaczApi {
     private TaczApi() {}
 
     public static void install(NumenApi numen) {
-        numen.api("gun", "TACZ firearms: list them and what you carry, take one in hand, shoot at an entity (auto "
-                + "bolt/reload/scope), fire where you face, work the bolt, reload, switch fire mode, aim.", TaczApi.class);
+        numen.api("gun", "TACZ firearms: list them, what you carry and which can fire, take one in hand, shoot at an "
+                + "entity (auto bolt/reload/scope), fire where you face, work the bolt, reload, switch fire mode, aim.",
+                TaczApi.class);
     }
 
-    /** 现况:有哪些枪、背包里带着哪几把、手上是什么、枪此刻什么状态。 */
-    @Doc("The TACZ guns on this pack, the ones you carry, and the state of the gun you hold.")
+    /** 现况:有哪些枪、背包里带着哪几把、哪几把现在能开火、手上是什么、枪此刻什么状态。 */
+    @Doc("The TACZ guns on this pack, the ones you carry, which of them can fire now, and the state of the gun you hold.")
     public record Options(@Doc("Every gun id TACZ knows, sorted.") List<String> guns,
                           @Doc("The guns in your inventory, gun id to how many you carry (main hand, offhand and "
                                   + "backpack all count). Empty when you carry none.")
                           Map<String, Integer> carried,
+                          @Doc("The guns you carry that can fire right now — magazine loaded or matching ammo in your "
+                                  + "inventory. Empty when none can.")
+                          List<String> fireable,
                           @Doc("The gun in your main hand now; none when you hold no TACZ gun.")
                           Optional<String> mainHand,
                           @Doc("Rounds in the gun's magazine; absent when you hold no TACZ gun.")
@@ -75,31 +79,33 @@ public final class TaczApi {
                           Optional<Long> coolDownMs) {}
 
     /**
-     * 有哪些枪、你带着哪几把、手上是什么、枪的状态。只读。枪 id 是装枪械包才有的清单;{@code carried} 是
-     * 你背包里真实带着的枪,两把不同的枪在那里是两条不同的 id——切换武器就是拿另一条的 id 去 equip。
-     * 手上拿的枪能读弹匣余弹、膛内有没有子弹、换弹/拉栓/疾跑/冷却状态;备弹(包里的弹匣/弹药盒)读不到。
+     * 有哪些枪、你带着哪几把、哪几把现在能开火、手上是什么、枪的状态。只读。枪 id 是装枪械包才有的清单;
+     * {@code carried} 是你背包里真实带着的枪,{@code fireable} 是其中现在能开火的(弹匣有弹或带着匹配弹药)。
+     * 手上拿的枪能读弹匣余弹、膛内有没有子弹、换弹/拉栓/疾跑/冷却状态。
      */
-    @Fn("The TACZ guns on this pack, the guns you carry (id to count), and the state of the gun you hold: ammo, "
-            + "chamber, reloading, bolting, sprinting, shoot cool-down.")
+    @Fn("The TACZ guns on this pack, the guns you carry (id to count), which of them can fire now, and the state of "
+            + "the gun you hold: ammo, chamber, reloading, bolting, sprinting, shoot cool-down.")
     @Example("tacz.gun.options()")
     @Example("for _, g in ipairs(tacz.gun.options().guns) do print(g) end")
     @Example("local o = tacz.gun.options(); for id, n in pairs(o.carried) do print(id, n) end")
     @Note("Read-only. The ids come from the gun packs installed; pick one exactly as listed.")
-    @Note("carried lists each gun you actually carry by its own id — two different guns are two different ids there.")
-    @Note("Ammo is read from the gun in hand only; TACZ does not tell the server about spare magazines.")
-    @Note("You rarely need to poll this before shooting: shoot handles the gun's state on its own.")
+    @Note("carried lists each gun you actually carry by its own id; fireable is the subset that can shoot right now "
+            + "(ammo loaded or carried).")
+    @Note("You rarely need to poll this before shooting: shoot and numen.fight.attack handle the guns' state on their "
+            + "own, and they switch to a gun that can fire when the held one is dry.")
     @SeeAlso({"tacz.gun.equip", "tacz.gun.shoot"})
     public static Options options(ServerCall call) {
         NumenPlayer her = call.her();
         ItemStack stack = her.getMainHandItem();
         com.tacz.guns.api.item.IGun gun = com.tacz.guns.api.item.IGun.getIGunOrNull(stack);
         Map<String, Integer> carried = Tacz.carriedGuns(her);
+        List<String> fireable = Tacz.fireableGuns(her);
         if (gun == null) {
-            return new Options(Tacz.gunIds(), carried, Optional.empty(), Optional.empty(), Optional.empty(),
+            return new Options(Tacz.gunIds(), carried, fireable, Optional.empty(), Optional.empty(), Optional.empty(),
                     Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
         }
         Tacz.Held held = Tacz.held(her, stack);
-        return new Options(Tacz.gunIds(), carried, Optional.of(gun.getGunId(stack).toString()),
+        return new Options(Tacz.gunIds(), carried, fireable, Optional.of(gun.getGunId(stack).toString()),
                 Optional.of(gun.getCurrentAmmoCount(stack)),
                 Optional.of(held.bulletInBarrel()), Optional.of(held.reloading()), Optional.of(held.bolting()),
                 Optional.of(held.sprinting()), Optional.of(held.coolDownMs()));
@@ -143,8 +149,8 @@ public final class TaczApi {
     /**
      * 朝一只实体开一枪。先过权限层(攻击那只实体),放行了就派一段自动开火短活,状态机照车万女仆验证过的枪械逻辑:
      * 手动枪膛空先拉栓、弹匣空先换弹、没切枪先切枪、狙击枪先开镜、等冷却与换弹/拉栓收尾、疾跑站定、身体转向目标
-     * ——直到子弹出膛,或者实在开不了(没弹药、手上没枪)。派发那一刻就按住战斗与逃跑两条本能,开火期间身体不被抢、
-     * 不乱跑。
+     * ——直到子弹出膛,或者实在开不了(没弹药、手上没枪)。手上这把枪没弹、又没有匹配弹药时,自动换背包里另一把能
+     * 开火的枪接着打。派发那一刻就按住战斗与逃跑两条本能,开火期间身体不被抢、不乱跑。
      *
      * <p>不走路、不量距离:打得中打不中取决于你站哪、看不看得见;先 {@code numen.scan.sight} 看好,看得见就直接打,
      * 看不见才走位。
@@ -155,6 +161,8 @@ public final class TaczApi {
     @Note("One shot per call: it fires once and reports. For several shots, call it once for each.")
     @Note("It uses the gun you hold (tacz.gun.equip first) and readies it on its own: manual-action guns are chambered, "
             + "empty magazines are reloaded if you carry matching ammo, sniper rifles are scoped in before the shot.")
+    @Note("When the held gun is dry and you carry no matching ammo, it switches to another gun you carry that can fire "
+            + "and keeps going.")
     @Note("It turns your body to face the target, so the bullet flies where the gun points.")
     @Note("While it fires, your combat and flee instincts stand down, so nothing else grabs the body mid-shot — even "
             + "when a zombie is chasing you.")
