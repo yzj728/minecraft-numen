@@ -3,8 +3,10 @@ package com.dwinovo.numen.plugins.tacz;
 import com.dwinovo.numen.api.combat.Firearms;
 import com.dwinovo.numen.api.combat.RangedFirearm;
 import com.dwinovo.numen.entity.NumenPlayer;
+import com.tacz.guns.api.TimelessAPI;
 import com.tacz.guns.api.entity.IGunOperator;
 import com.tacz.guns.api.entity.ShootResult;
+import com.tacz.guns.api.item.GunTabType;
 import com.tacz.guns.api.item.IGun;
 import com.tacz.guns.entity.shooter.ShooterDataHolder;
 import net.minecraft.commands.arguments.EntityAnchorArgument;
@@ -12,6 +14,7 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -27,6 +30,10 @@ import java.util.Set;
  * <h2>开火那一刻才转身</h2>
  * 子弹方向由传给 shoot 的俯仰/偏航决定,但玩家看到的枪口朝向得和它一致——开火那一拍用原版
  * {@code lookAt(EYES)} 转身(和 Numen 弓战斗"松手前才瞄"同一个道理,每刻转会带偏移动)。
+ *
+ * <h2>交战距离按枪型给</h2>
+ * 女仆的判据:狙击远距离、喷子/手枪/冲锋枪近距离、其余中距离。这里同款分档,战斗走位环照它定——
+ * 目标在射程内有视线就原地开枪,而不是贴脸挨打或跑来跑去。
  */
 final class TacFirearm implements RangedFirearm {
 
@@ -36,6 +43,36 @@ final class TacFirearm implements RangedFirearm {
     @Override
     public boolean isFirearm(ItemStack stack) {
         return IGun.getIGunOrNull(stack) != null;
+    }
+
+    @Override
+    public double engagementRange(ItemStack stack) {
+        IGun gun = IGun.getIGunOrNull(stack);
+        if (gun == null) {
+            return 16.0;
+        }
+        String type = TimelessAPI.getCommonGunIndex(gun.getGunId(stack))
+                .map(index -> index.getType()).orElse("");
+        // 照车万女仆的分档:狙击最远,喷子最近,其余居中
+        if (GunTabType.SNIPER.name().toLowerCase(Locale.ENGLISH).equals(type)) {
+            return 24.0;
+        }
+        if (GunTabType.SHOTGUN.name().toLowerCase(Locale.ENGLISH).equals(type)) {
+            return 8.0;
+        }
+        if (GunTabType.PISTOL.name().toLowerCase(Locale.ENGLISH).equals(type)) {
+            return 10.0;
+        }
+        if (GunTabType.SMG.name().toLowerCase(Locale.ENGLISH).equals(type)) {
+            return 12.0;
+        }
+        if (GunTabType.MG.name().toLowerCase(Locale.ENGLISH).equals(type)) {
+            return 18.0;
+        }
+        if (GunTabType.RPG.name().toLowerCase(Locale.ENGLISH).equals(type)) {
+            return 20.0;
+        }
+        return 16.0;
     }
 
     @Override
