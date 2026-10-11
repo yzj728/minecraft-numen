@@ -61,6 +61,8 @@ import com.dwinovo.numen.pathing.body.BodyCompat;
  * 弓的环固定在 8~12 格(拉弓要时间、箭有效距离短)。枪不用拉弓,交战距离按枪型给
  * ({@link RangedFirearm#engagementRange}:喷子近、狙击远)——目标在射程内<b>且有视线</b>就
  * 原地站定开枪,环只有在她贴得太近或打不着时才把她挪开。于是"看见就打",不用先挨一下。
+ * <b>天上飞的目标例外</b>:走位环追不到它,所以飞行目标不受距离门拦——多远都开枪,
+ * 子弹伤害随距离衰减,TACZ 自己算。
  *
  * <h2>回执带上武器:模型知道自己开过枪</h2>
  * 用枪打过的仗,收尾回执写明"是我用枪打的、开了几枪"——自卫本能(它派的就是这场仗)把这句话
@@ -475,6 +477,10 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
      * <p>不看攻击冷却:原版举着盾照样能挥刀,两件事不冲突;也不拦攻击层 —— 那样两层就又
      * 耦上了。举着会减速,代价认了:能挡住的那一下比早退半格值。盾被斧子破了会进冷却,
      * 那时她就正常跑。
+     *
+     * <p>同行没有可抄的(AltoClef 完全没有用盾逻辑,Meteor 管的是怎么破<b>对手</b>的盾),
+     * 这套判据与 PR #13 的 {@code ShieldCombatPolicy} 同源,只是去掉了"冷却好了放盾"
+     * 那一步 —— 既然能边举边砍,那一步是多余的。
      */
     private void tickShield() {
         if (bowFighting) {
@@ -891,7 +897,8 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
     /**
      * 枪械路径:枪不用拉弓蓄力,每刻让枪械插件(经 {@link Firearms})摆状态、能打就开一枪。
      * <b>目标在射程内且有视线,就原地开枪</b>——走位环只在她贴得太近、太远或看不见时才挪她。
-     * 朝向在开火那一拍由插件自己转——和弓"松手前才瞄"同一个道理,每刻转会带偏脚。
+     * <b>飞行目标不受距离门拦</b>:走位环追不到天上飞的东西,所以它不落地就多远都开枪
+     * (子弹伤害随距离衰减,TACZ 自己算)。朝向在开火那一拍由插件自己转。
      */
     private TaskState shootFirearm(Loadout.Pick weapon) {
         // 枪只能打活物(末影水晶这类不是 LivingEntity 的走原版近战路径)
@@ -899,8 +906,10 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
             return closeIn();
         }
         double distance = player.distanceTo(target);
-        if (distance > ringOuter) {
-            return TaskState.RUNNING;   // 射程外:不放,走位环自然靠近
+        // 地面目标按交战环靠近了再打(走位环会带她过去);天上飞的下不来,多远都打——
+        // 这是"能打天上的"那一条,第一版就有这个能力。
+        if (distance > ringOuter && target.onGround()) {
+            return TaskState.RUNNING;
         }
         // 看不见就打不着:让走位层去找位置,别对墙空射
         if (!player.hasLineOfSight(livingTarget)) {
