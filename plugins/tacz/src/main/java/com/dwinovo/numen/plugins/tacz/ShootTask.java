@@ -20,12 +20,15 @@ import net.minecraft.world.item.ItemStack;
  * 没切枪就切({@code NOT_DRAW})、每步按枪械数据的耗时等足再打。这里逐条照做,只把女仆的
  * "每 N tick 再调一次"换成任务等刻度——同一套逻辑,同一个节拍。
  *
+ * <h2>隔墙打不着</h2>
+ * 这一枪走的是 {\@code tacz.gun.shoot} 的精细控制道:目标明确、由模型点名。没有视线就直接失败并
+ * 说清——让模型换位置或先用 {\@code numen.scan.sight} 看,而不是对墙空射浪费子弹。自卫与
+ * {\@code numen.fight.attack} 走的是战斗系统自己的道({\@code TacFirearm}),那边由走位层找视线。
+ *
  * <h2>为什么按住战斗与逃跑两条本能</h2>
- * 同伴身上有 {@code mob_defense}(怪逼近就自动开打,按原版剑/弓逻辑走位,不认识 TACZ 枪)与
- * {@code flee}(判定为空手或扛不住就被追着跑,同样不认识枪)两条反射链,优先级都高于同步短活。
- * 它们一抢身体,开火任务就永远轮不到,枪自然开不出来——"遇敌乱跑、开不了枪"正是它们干的。
- * 官方 {@code attack} 任务开工时按住 {@code mob_defense} 是同一条路;这里把两条都按住:
- * 开火的这几刻身体归这个任务,本能不抢。任务一结束,空闲时由引擎统一解除,不用显式还。
+ * 同伴身上有 {\@code mob_defense}(怪逼近就自动开打,按原版剑/弓逻辑走位)与 {\@code flee}(判定为空手或
+ * 扛不住就被追着跑)两条反射链,优先级都高于同步短活。开火期间按住它们,身体不被抢、不乱跑。
+ * 任务一结束,空闲时由引擎统一解除,不用显式还。
  */
 final class ShootTask implements Task {
 
@@ -57,6 +60,12 @@ final class ShootTask implements Task {
         Entity found = her.serverLevel().getEntity(r.targetId);
         if (!(found instanceof LivingEntity living) || !living.isAlive()) {
             outcome = "the target is gone (died or left) before a shot went off";
+            return TaskState.FAILED;
+        }
+        // 隔墙打不着:没有视线就直接说,让模型换位置——别对墙空射浪费子弹
+        if (!her.hasLineOfSight(living)) {
+            outcome = "no line of sight to " + living.getName().getString() + " — move to where you can see it, or "
+                    + "check numen.scan.sight first";
             return TaskState.FAILED;
         }
         ItemStack stack = her.getMainHandItem();
