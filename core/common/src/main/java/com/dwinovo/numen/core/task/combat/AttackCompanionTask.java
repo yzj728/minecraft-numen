@@ -62,6 +62,11 @@ import com.dwinovo.numen.pathing.body.BodyCompat;
  * ({@link RangedFirearm#engagementRange}:喷子近、狙击远)——目标在射程内<b>且有视线</b>就
  * 原地站定开枪,环只有在她贴得太近或打不着时才把她挪开。于是"看见就打",不用先挨一下。
  *
+ * <h2>回执带上武器:模型知道自己开过枪</h2>
+ * 用枪打过的仗,收尾回执写明"是我用枪打的、开了几枪"——自卫本能(它派的就是这场仗)把这句话
+ * 转告模型后,模型就明白怪是它开枪打死的,而不是"突然死了"。枪手也不挥拳:拿枪贴脸挥击只会
+ * 把目标惊跑,开枪才是这场仗的事。
+ *
  * <h2>会炸的东西</h2>
  * 爬行者<b>引信点着之前就是一只普通怪</b>:她够得着 4 格、它 3 格才点火,中间那条一格宽的带
  * 能打到它而不触发。点着了再退也来得及——引信 30 刻,而爆炸伤害到 6 格就归零,从 3 格退出去
@@ -141,6 +146,9 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
      */
     private double ringInner = BOW_MIN_DISTANCE;
     private double ringOuter = BOW_MAX_DISTANCE;
+
+    /** 这场仗开过枪(经 {@link Firearms} 的枪械)。回执里带上它,模型才知道怪是谁打死的。 */
+    private boolean usedFirearm;
 
     public AttackCompanionTask(NumenPlayer player, AttackTaskRecord record) {
         super(player, record);
@@ -467,10 +475,6 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
      * <p>不看攻击冷却:原版举着盾照样能挥刀,两件事不冲突;也不拦攻击层 —— 那样两层就又
      * 耦上了。举着会减速,代价认了:能挡住的那一下比早退半格值。盾被斧子破了会进冷却,
      * 那时她就正常跑。
-     *
-     * <p>同行没有可抄的(AltoClef 完全没有用盾逻辑,Meteor 管的是怎么破<b>对手</b>的盾),
-     * 这套判据与 PR #13 的 {@code ShieldCombatPolicy} 同源,只是去掉了"冷却好了放盾"
-     * 那一步 —— 既然能边举边砍,那一步是多余的。
      */
     private void tickShield() {
         if (bowFighting) {
@@ -537,11 +541,18 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
      * 动作,那时判据给的目标是"全场"、任务里的 {@code target} 是空 —— 手里那把剑等于不存在。
      * 实测她躲的时候一刀不还。
      *
+     * <p><b>枪手不挥拳</b>:远程武器是枪时这里直接让位——拿枪贴脸挥击只会把目标惊跑,
+     * 开枪才是这场仗的事。
+     *
      * @param field 这一刻的局面,复用 onTick 已经扫好的那份
      */
     private void tickWeapon(Battlefield field) {
         if (player.isUsingItem() && !shieldRaised()) {
             return;   // 正在拉弓或吃东西,别打断
+        }
+        Loadout loadout = Loadout.forTarget(player, player);
+        if (loadout.ranged() != null && Firearms.isFirearm(loadout.ranged().stack())) {
+            return;   // 枪手不挥拳:手里是枪,贴脸挥击只会惊跑目标,开枪才是这场仗的事
         }
         // <b>举着盾照样挥刀</b> —— 原版这两件事不冲突。这条守卫本意是拦"正在拉弓",
         // 却写成了"手上用着任何东西";副手多了一面盾之后,它把攻击层整个锁死:
@@ -549,7 +560,6 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         // 武器是<b>可选的</b>:拳头一点伤害,鸡四血、羊八血、牛十血,照样打得动。
         // 这里曾经"没有近战武器就直接返回" —— 那是按"打怪"写的前提(赤手对上会还手的
         // 东西不是出路),模型让她打一只鸡时那个前提不成立,她会走到跟前站着不动。
-        Loadout loadout = Loadout.forTarget(player, player);
         Feet here = Feet.of(player);
         if (here == null) {
             return;   // 悬在半空:没有站着的那一格,够不够得着无从按站位判
@@ -914,6 +924,7 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         }
         if ("fired".equals(result)) {
             r.strike(target.getId());
+            usedFirearm = true;
             misfires = 0;
         } else if (++misfires >= MAX_MISFIRES) {
             fail("the gun did not fire: " + result, FailureType.WRONG_TOOL);
@@ -969,6 +980,17 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
                 : r.defeated().size() + "/" + r.entityIds.size() + " requested entities";
     }
 
+    /**
+     * 用枪打过,回执就写明:模型因此知道自己开过枪、怪是谁打死的——自卫本能把这句话转告它,
+     * 它就不会以为"怪突然死了"。
+     */
+    private String gunNote() {
+        if (!usedFirearm) {
+            return "";
+        }
+        return " — I shot with my gun (" + r.strikes() + " shot" + (r.strikes() == 1 ? "" : "s") + ")";
+    }
+
     /** 打倒了什么,它掉的东西留在地上:捡是 {@code numen.work.collect} 的事。 */
     private String drops() {
         return r.defeated().isEmpty() ? "" : "; what they dropped lies on the ground: `numen.work.collect()` picks it up";
@@ -978,21 +1000,22 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
     protected String successMessage() {
         String refusedNote = r.refused().isEmpty() ? "" : "; left alone: " + refusedSummary();
         if (r.indiscriminate) {
-            return "fought off " + tally() + "; nothing is coming after you any more" + refusedNote + drops();
+            return "fought off " + tally() + "; nothing is coming after you any more" + gunNote() + refusedNote
+                    + drops();
         }
         int incomplete = r.lost().size() + r.unreachable().size();
         return "defeated " + tally()
                 + (incomplete == 0 ? "" : " (" + incomplete + " targets could not be completed)")
-                + refusedNote + drops();
+                + gunNote() + refusedNote + drops();
     }
 
     @Override
     protected String timeoutMessage() {
-        return "attack timed out after defeating " + tally();
+        return "attack timed out after defeating " + tally() + gunNote();
     }
 
     @Override
     protected String cancelledMessage() {
-        return "attack interrupted after defeating " + tally();
+        return "attack interrupted after defeating " + tally() + gunNote();
     }
 }
