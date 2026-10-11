@@ -46,4 +46,12 @@ public interface RangedFirearm {
     default double engagementRange(ItemStack gun) {
         return 16.0;
     }
+
+    /**
+     * 这把枪现在能不能打出子弹:弹匣里有弹,或背包里有匹配的弹药/弹匣(枪械插件自己判断)。
+     * 战斗挑枪时优先挑能开火的枪——两把枪只有一把带着弹,不会挑到没弹的那把。
+     */
+    default boolean canFire(NumenPlayer shooter, ItemStack gun) {
+        return true;
+    }
 }
