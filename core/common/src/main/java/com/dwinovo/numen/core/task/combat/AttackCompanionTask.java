@@ -57,6 +57,11 @@ import com.dwinovo.numen.pathing.body.BodyCompat;
  * 选哪一套则只有一处判据 {@link AttackPlan},本能链用的也是同一处。枪械(经 {@link Firearms}
  * 注册)走远程那一套:拿起就打,不用拉弓,状态机(拉栓/换弹/开镜/冷却)由枪械插件自己摆。
  *
+ * <h2>枪的战斗环是枪自己的</h2>
+ * 弓的环固定在 8~12 格(拉弓要时间、箭有效距离短)。枪不用拉弓,交战距离按枪型给
+ * ({@link RangedFirearm#engagementRange}:喷子近、狙击远)——目标在射程内<b>且有视线</b>就
+ * 原地站定开枪,环只有在她贴得太近或打不着时才把她挪开。于是"看见就打",不用先挨一下。
+ *
  * <h2>会炸的东西</h2>
  * 爬行者<b>引信点着之前就是一只普通怪</b>:她够得着 4 格、它 3 格才点火,中间那条一格宽的带
  * 能打到它而不触发。点着了再退也来得及——引信 30 刻,而爆炸伤害到 6 格就归零,从 3 格退出去
@@ -128,6 +133,14 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
     private AttackPlan.Action lastLoggedAction;
     /** 上一刻的决定。判据靠它做迟滞与承诺,见 {@link AttackPlan#decide}。 */
     private AttackPlan.Move lastMove;
+
+    /**
+     * 这一刻远程战斗的环:弓是固定的 {@link #BOW_MIN_DISTANCE}~{@link #BOW_MAX_DISTANCE},
+     * 枪按枪型给({@link RangedFirearm#engagementRange} 的 0.5 倍到 1.0 倍)。走位与射程判据
+     * 都问这两个数,不各写各的。
+     */
+    private double ringInner = BOW_MIN_DISTANCE;
+    private double ringOuter = BOW_MAX_DISTANCE;
 
     public AttackCompanionTask(NumenPlayer player, AttackTaskRecord record) {
         super(player, record);
@@ -592,7 +605,18 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         // <b>两层并行</b>:脚一直在走位,手一直在拉弓。原版拉弓时本来就能走(只是慢),
         // 是我在 shootAt 里主动 halt 的 —— 于是每刻建一次导航、拆一次,看着像被打断。
         driveApproach();
-        return shootAt(Loadout.forTarget(player, target));
+        Loadout loadout = Loadout.forTarget(player, target);
+        // 先按这一刻的武器把环定下来:弓是固定的 8~12,枪按枪型给(喷子近、狙击远)
+        Loadout.Pick ranged = loadout.ranged();
+        if (ranged != null && Firearms.isFirearm(ranged.stack())) {
+            RangedFirearm firearm = Firearms.of(ranged.stack());
+            ringOuter = firearm == null ? 16.0 : firearm.engagementRange(ranged.stack());
+            ringInner = Math.max(4.0, ringOuter * 0.5);
+        } else {
+            ringInner = BOW_MIN_DISTANCE;
+            ringOuter = BOW_MAX_DISTANCE;
+        }
+        return shootAt(loadout);
     }
 
 
@@ -659,18 +683,19 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
 
     /**
      * 走位环的外沿,按离它的中心距:剑是够到距离({@link Swing#reachTo},用来判内沿还剩不剩一条带、打站位日志;剑的环本身由
-     * {@link #reachOf} 判),弓是 {@link #BOW_MAX_DISTANCE}。
+     * {@link #reachOf} 判),弓是固定的 12 格,枪是枪型给的交战距离。
      */
     private double skirmishOuter() {
-        return bowFighting ? BOW_MAX_DISTANCE : reachToTarget();
+        return bowFighting ? ringOuter : reachToTarget();
     }
 
     /**
-     * 走位环的内沿:剑是"它够得着我",弓是"拉得开弓的距离"。它够得比她的外沿还远(大史莱姆、点着的苦力怕)时,
-     * 打得着又挨不着的那条带本来就不存在,内沿归零:环退成"走进够得着的地方"。
+     * 走位环的内沿:剑是"它够得着我",弓是"拉得开弓的距离",枪是交战距离的一半(比这近就往后退)。
+     * 它够得比她的外沿还远(大史莱姆、点着的苦力怕)时,打得着又挨不着的那条带本来就不存在,内沿归零:
+     * 环退成"走进够得着的地方"。
      */
     private double skirmishInner() {
-        double inner = bowFighting ? BOW_MIN_DISTANCE
+        double inner = bowFighting ? ringInner
                 : target == null ? 0.0 : Menace.rawDangerRadius(target, player);
         return inner < skirmishOuter() ? inner : 0.0;
     }
@@ -747,7 +772,7 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         // 同一套站位坐标。走位说到了,攻击层就挥得出去;它挪出去了,这一格就不再算到,下一趟接着往前走。
         //
         // 内沿用<b>裸</b>攻击距离(2.02),不加格量化补偿,从格心量到它此刻的位置。带宽约 1.28 格,比格量化误差
-        // 0.71 宽出一截。弓的环在 8~12 格,问的是拉不拉得开弓,按它所在的那一列量。
+        // 0.71 宽出一截。远程的环问的是拉不拉得开弓/打不打得到,按它所在的那一列量。
         Goal ring = bowFighting
                 ? Goals.within(Goals.column(target.getBlockX(), target.getBlockZ()), skirmishInner(), skirmishOuter())
                 : swordRing();
@@ -757,10 +782,10 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         if (others.isEmpty()) {
             return ring;
         }
-        // 弓那一套的内沿对<b>每一只</b>都成立:她要跟所有怪保持五格,不只是当前目标。
+        // 远程那一套的内沿对<b>每一只</b>都成立:她要跟所有怪保持交战内沿,不只是当前目标。
         List<Threat> keepOff = bowFighting
                 ? others.stream()
-                        .map(t -> new Threat(t.x(), t.y(), t.z(), Math.max(t.radius(), BOW_MIN_DISTANCE)))
+                        .map(t -> new Threat(t.x(), t.y(), t.z(), Math.max(t.radius(), skirmishInner())))
                         .toList()
                 : others;
         return Goals.allOf(List.of(ring, Goals.awayFrom(keepOff)));
@@ -801,7 +826,7 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
         // 这里曾经"近于内沿就 abortShot":僵尸一走进八格,拉到一半的弓当场取消;她退开、
         // 重新起手、僵尸又跟进来 —— 一箭都放不出去。距离是走位的判据,混进攻击层就成了
         // 一个把自己打断的开关。
-        if (player.distanceTo(target) > BOW_MAX_DISTANCE) {
+        if (player.distanceTo(target) > ringOuter) {
             return TaskState.RUNNING;   // 射程外:不放,但<b>也不取消</b>,弓接着拉
         }
         boolean crossbow = RangedShot.isCrossbow(weapon);
@@ -855,16 +880,21 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
 
     /**
      * 枪械路径:枪不用拉弓蓄力,每刻让枪械插件(经 {@link Firearms})摆状态、能打就开一枪。
-     * 走位环照弓那套(8~12 格),朝向在开火那一拍由插件自己转——和弓"松手前才瞄"同一个道理,
-     * 每刻转会带偏脚。疾跑中枪也打不出,先站定。
+     * <b>目标在射程内且有视线,就原地开枪</b>——走位环只在她贴得太近、太远或看不见时才挪她。
+     * 朝向在开火那一拍由插件自己转——和弓"松手前才瞄"同一个道理,每刻转会带偏脚。
      */
     private TaskState shootFirearm(Loadout.Pick weapon) {
         // 枪只能打活物(末影水晶这类不是 LivingEntity 的走原版近战路径)
         if (!(target instanceof LivingEntity livingTarget)) {
             return closeIn();
         }
-        if (player.distanceTo(target) > BOW_MAX_DISTANCE) {
+        double distance = player.distanceTo(target);
+        if (distance > ringOuter) {
             return TaskState.RUNNING;   // 射程外:不放,走位环自然靠近
+        }
+        // 看不见就打不着:让走位层去找位置,别对墙空射
+        if (!player.hasLineOfSight(livingTarget)) {
+            return TaskState.RUNNING;
         }
         RangedFirearm firearm = Firearms.of(weapon.stack());
         if (firearm == null) {
