@@ -8,31 +8,34 @@ description: 用 TACZ 枪械作战。需要开枪、射击、清怪、自卫、�
 装了 TACZ 之后,**你的身体认识 TACZ 枪**——它把枪当成真正的远程武器。打怪时直接走原来的战斗命令,
 身体自己会拿枪、走位、瞄准、开枪、拉栓、换弹、开镜,不用你操心。`tacz.gun` 组里的函数是精细控制:看枪、换枪、试枪。
 
-## 打一个具体目标(包括中立生物):用 tacz.gun.shoot
+## 打一个具体目标(牛、羊、天上飞的、任何有权限的目标):用 tacz.gun.shoot
 
-要打**某一只具体的实体**——主人点名的怪、一只牛、任何你有权限打的目标——用这个:
+`tacz.gun.shoot` 朝目标**直接瞄准开一枪,任何实体都能打**:牛、羊、鸡、猪、天上飞的都行,
+不挑敌不敌对——只受权限层管。**没有距离限制、没有"看不见就不打"的限制**:瞄准就打,
+打不打得着由回执告诉你。
 
 ```lua
-local foe = numen.scan.entities("hostile", {radius = 24})[1]   -- 或者 numen.scan.entities("all"/"animal")
-tacz.gun.equip("tacz:ak47")                                    -- 先拿上枪(可选:shoot 用的是你手上的枪)
-local shot = tacz.gun.shoot(foe)                               -- 原地瞄准打一发
+local foes = numen.scan.entities("all", {radius = 24})   -- "all" 扫全部(牛也在里面);天上飞的用 "mob"
+tacz.gun.shoot(foes[1])                                  -- 原地瞄准打一发
 ```
 
 **回执是实话,照它说的理解:**
 
 - `result = "hit"` → 打中了,目标掉血了;
 - `result = "killed"` → 这一发把它打死了;
-- `result = "missed"` → 子弹打出去了,但没接上:目标可能挪了、超出有效射程、或者中间有东西挡着。
-  **走近一点、或确认视线(numen.scan.sight)再打,别自己推断"没弹药"。**
-- 其他结果(no_ammo / not_gun / no line of sight)照字面理解,照它说的做。
+- `result = "missed"` → 子弹打出去了,但没接上:目标可能挪了、超出枪的有效射程、或者中间有东西挡着。
+  **这是距离/弹道的事,不是弹药的事——走近几格再打**(numen.move.to 到它附近 10 格内),或者再打一发。
+- 其他结果(no_ammo / not_gun)照字面理解,照它说的做。
 
-**绝不要自己推断"弹药不匹配/枪没伤害"**:子弹确实打出去就是 success/hit/missed,弹药状态看
+**绝不要自己推断"弹药不匹配/枪没伤害"**:子弹确实打出去就是 hit/missed/killed,弹药状态看
 `tacz.gun.options().fireable`。你开枪造成伤害这件事是真实的。
+
+打天上飞的东西:**站在原地就能打**,不用走过去。
 
 ## 清怪 / 遭遇战 / 跟随警戒:用 numen.fight.attack(自动用枪)
 
 ```lua
-numen.fight.attack(foe)      -- 一场仗:自己走位、自己开枪、打死为止
+numen.fight.attack(foe)      -- 一场仗:自己走位、自己开枪、打死为止(打天上的也照打)
 numen.fight.clear()          -- 清掉附近所有敌对生物
 ```
 
