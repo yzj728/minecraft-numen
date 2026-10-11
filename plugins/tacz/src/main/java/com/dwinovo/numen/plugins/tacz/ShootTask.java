@@ -2,7 +2,6 @@ package com.dwinovo.numen.plugins.tacz;
 
 import com.dwinovo.numen.agent.script.ErrorKind;
 import com.dwinovo.numen.entity.NumenPlayer;
-import com.dwinovo.numen.sdk.Call;
 import com.dwinovo.numen.task.Task;
 import com.dwinovo.numen.task.TaskResult;
 import com.dwinovo.numen.task.TaskState;
@@ -11,8 +10,6 @@ import com.tacz.guns.api.item.IGun;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
-
-import java.util.Map;
 
 /**
  * 打出一发:任务每刻把枪的状态机摆对,直到子弹真的出膛,或实在开不了枪。
@@ -23,13 +20,13 @@ import java.util.Map;
  * 没切枪就切({@code NOT_DRAW})、每步按枪械数据的耗时等足再打。这里逐条照做,只把女仆的
  * "每 N tick 再调一次"换成任务等刻度——同一套逻辑,同一个节拍。
  *
- * <h2>朝向与站定照 Numen 自己的弓战斗</h2>
- * 开枪前身体站定(松键、停疾跑)、用原版 {@code lookAt(EYES)} 把身体、头、视线全转向目标——
- * 和 Numen 弓战斗挥刀/松手那一刻做的一模一样,于是客户端看到的枪口朝向和子弹方向一致。
+ * <h2>这把枪没弹,换一把接着打</h2>
+ * 手上这把枪弹匣空、包里又没有它的匹配弹药时,先看背包里有没有另一把能开火的枪——有就换过去
+ * 继续打(喷子打光换狙),不把"没弹药"当最终失败。真的一把都打不了,才失败并说清缺什么。
  *
- * <h2>看不见就不打,立刻说清</h2>
- * 枪是直射弹道,中间有墙就是白打。目标不在视线里时当场失败,回执写明"看不见,先 numen.scan.sight
- * + numen.move.to 换位再打"——不让模型对着墙反复扣扳机,也不让任务傻等。
+ * <h2>身体先站定、再转向,然后才扣扳机</h2>
+ * 开枪需要疾跑状态清空,而且子弹方向必须和身体朝向一致(玩家看到枪口朝哪,子弹往哪)。
+ * 所以每刻先把移动键松开站定、把身体与头转向目标,再问枪的状态、扣扳机。
  *
  * <h2>为什么按住战斗与逃跑两条本能</h2>
  * 同伴身上有 {@code mob_defense}(怪逼近就自动开打,按原版剑/弓逻辑走位,不认识 TACZ 枪)与
@@ -48,7 +45,7 @@ final class ShootTask implements Task {
     private final ShootRecord r;
     /** 走到终态时说给模型听的那句话。 */
     private String outcome = "";
-    /** 已经试过换弹。再弹 NO_AMMO 就是包里真的没有对应弹药,判死,别在换弹和空射之间死循环。 */
+    /** 已经对当前手上这把枪试过换弹。再弹 NO_AMMO 就是包里真的没有对应弹药,换枪或判死。 */
     private boolean reloadTried;
     /** 上一拍安排的等待(开镜、拉栓的耗时):到这个游戏刻之前什么也不做。 */
     private long waitUntil = -1;
@@ -121,14 +118,24 @@ final class ShootTask implements Task {
                 return TaskState.RUNNING;
             }
             case NO_AMMO -> {
-                if (reloadTried) {
-                    outcome = "no ammo, and reloading did not feed new rounds — you carry no matching ammo";
-                    return TaskState.FAILED;
+                if (!reloadTried) {
+                    reloadTried = true;
+                    // 换弹只会"开始",换没换完由下一刻的 held.reloading 看;换不起来就是没弹药
+                    Tacz.reload(her);
+                    return TaskState.RUNNING;
                 }
-                reloadTried = true;
-                // 换弹只会"开始",换没换完由下一刻的 held.reloading 看;换不起来就是没弹药
-                Tacz.reload(her);
-                return TaskState.RUNNING;
+                // 这把枪弹匣空、又没有它的匹配弹药:换一把能开火的枪接着打
+                String gunId = gun.getGunId(stack).toString();
+                String other = Tacz.otherFireableGun(her, gunId);
+                if (other != null) {
+                    Tacz.equip(her, other);
+                    reloadTried = false;
+                    waitUntil = now + 10;   // 换枪让几刻切枪动作
+                    return TaskState.RUNNING;
+                }
+                outcome = "no_ammo: the gun " + gunId + " is empty and you carry no matching ammo, and no other "
+                        + "gun you carry can fire either — ask your owner for ammo";
+                return TaskState.FAILED;
             }
             case NOT_DRAW -> {
                 // 枪没登记成当前操作对象:切枪,女仆的同款处理
