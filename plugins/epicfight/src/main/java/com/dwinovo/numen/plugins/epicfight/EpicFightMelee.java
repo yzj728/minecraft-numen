@@ -1,10 +1,11 @@
 package com.dwinovo.numen.plugins.epicfight;
 
-import com.dwinovo.numen.Constants;
 import com.dwinovo.numen.api.combat.MeleeStyle;
 import com.dwinovo.numen.entity.InputDriver;
 import com.dwinovo.numen.entity.NumenPlayer;
 import net.minecraft.world.entity.LivingEntity;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import yesman.epicfight.world.capabilities.entitypatch.player.ServerPlayerPatch;
 
 /**
@@ -17,6 +18,8 @@ import yesman.epicfight.world.capabilities.entitypatch.player.ServerPlayerPatch;
  * 这是史诗战斗给玩家定义的那条正路,和真人按键走的是同一条服务器路径。
  */
 final class EpicFightMelee implements MeleeStyle {
+
+    private static final Logger LOG = LoggerFactory.getLogger("numen-epicfight");
 
     /** 只记一次“接管了挥击”:证明这条路径真的走到了,不是每次挥击都有一行。 */
     private boolean takeoverLogged;
@@ -44,14 +47,14 @@ final class EpicFightMelee implements MeleeStyle {
         if (done.executed()) {
             if (!takeoverLogged) {
                 takeoverLogged = true;
-                Constants.LOG.info("[numen-epicfight] 战斗模式近战接管:挥击走 BASIC_ATTACK 技能(目标={})", target.getId());
+                LOG.info("战斗模式近战接管:挥击走 BASIC_ATTACK 技能(目标={})", target.getId());
             }
             return true;
         }
         // 没打出去:大多数时候是“上一段动作还没完”(连击节奏由史诗战斗自己卡),这不是错;
         // 只把真的失败(没体力/不在战斗模式/没技能)记下来,方便排查。
-        if (Constants.LOG.isDebugEnabled()) {
-            Constants.LOG.debug("[numen-epicfight] 挥击未执行: {}", done.reason());
+        if (LOG.isDebugEnabled()) {
+            LOG.debug("挥击未执行: {}", done.reason());
         }
         return false;
     }
