@@ -19,9 +19,16 @@ public final class InputDriver {
 
     private InputDriver() {}
 
-    /** Aim the eyes at a point (yaw + pitch) — e.g. the eyes of whoever she talks to or hits. */
+    /**
+     * Aim the eyes at a point (yaw + pitch) — e.g. the eyes of whoever she talks to or hits.
+     *
+     * <p>额外把 {@code yBodyRot} 也一并对齐:史诗战斗这类模组按 {@code yBodyRot}/{@code modelYRot} 摆身体的朝向,
+     * 原版的 {@code lookAt} 只转视线与头、不转身体——不补这一下,身体模型还朝着旧方向,走路/挥砍看着就像平移、
+     * 动作方向和视线各朝一边。
+     */
     public static void lookAt(ServerPlayer p, Vec3 point) {
         p.lookAt(EntityAnchorArgument.Anchor.EYES, point);
+        p.setYBodyRot(p.getYRot());
     }
 
     /** 船的转向死区(度):差角小于它就不压舵。太小会和转向动量打架来回摆头。 */
@@ -68,5 +75,6 @@ public final class InputDriver {
         float yaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0);
         p.setYRot(yaw);
         p.setYHeadRot(yaw);
+        p.setYBodyRot(yaw);   // 身体朝向一起对齐:史诗战斗按 yBodyRot 摆模型,别让它和视线各朝一边
     }
 }
