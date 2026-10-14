@@ -106,7 +106,7 @@ public final class EpicFightApi {
         }
         SkillContainer guard = patch.getSkill(SkillSlots.GUARD);
         return new Status(true, EpicFight.modeOf(patch), patch.getStamina(), patch.getMaxStamina(),
-                EpicFight.guarding(patch, guard), EpicFight.weaponOf(her.getMainHandItem(), patch));
+                EpicFight.guarding(patch, guard), weapon(EpicFight.weaponOf(her.getMainHandItem(), patch)));
     }
 
     /** 主手是什么武器。 */
@@ -116,7 +116,7 @@ public final class EpicFightApi {
     @SeeAlso({"epicfight.fight.weapons", "epicfight.fight.status"})
     public static Weapon weapon(ServerCall call) {
         NumenPlayer her = call.her();
-        return EpicFight.weaponOf(her.getMainHandItem(), EpicFight.patchOf(her));
+        return weapon(EpicFight.weaponOf(her.getMainHandItem(), EpicFight.patchOf(her)));
     }
 
     /** 背包里所有的史诗战斗武器。 */
@@ -131,7 +131,7 @@ public final class EpicFightApi {
             ItemStack stack = her.getInventory().getItem(slot);
             EpicFight.Weapon w = EpicFight.weaponOf(stack, EpicFight.patchOf(her));
             if (w.recognized()) {
-                out.add(new Carried(slot, idOf(stack), w));
+                out.add(new Carried(slot, idOf(stack), weapon(w)));
             }
         }
         return out;
@@ -175,7 +175,7 @@ public final class EpicFightApi {
             + "positioning).")
     @SeeAlso({"epicfight.fight.mode", "epicfight.fight.dodge", "numen.fight.attack"})
     public static Action attack(ServerCall call) {
-        return EpicFight.attack(call.her());
+        return action(EpicFight.attack(call.her()));
     }
 
     /** 翻滚躲闪。 */
@@ -190,7 +190,7 @@ public final class EpicFightApi {
         if (!"forward".equals(direction) && !"backward".equals(direction)) {
             throw new ApiError(ErrorKind.BAD_ARGUMENT, "direction must be \"forward\" or \"backward\"", null);
         }
-        return EpicFight.dodge(call.her(), forward);
+        return action(EpicFight.dodge(call.her(), forward));
     }
 
     /** 举武器格挡 / 放下。 */
@@ -201,7 +201,17 @@ public final class EpicFightApi {
     @Note("Lower it when the fight pauses — holding it does nothing by itself.")
     @SeeAlso({"epicfight.fight.status", "epicfight.fight.attack"})
     public static Action guard(ServerCall call, Guard args) {
-        return EpicFight.guard(call.her(), args.on());
+        return action(EpicFight.guard(call.her(), args.on()));
+    }
+
+    /** {@code EpicFight} 的纯 record 转成这边带 {@code @Doc} 的 API record。 */
+    private static Weapon weapon(EpicFight.Weapon w) {
+        return new Weapon(w.recognized(), w.category(), w.style());
+    }
+
+    /** {@code EpicFight} 的纯 record 转成这边带 {@code @Doc} 的 API record。 */
+    private static Action action(EpicFight.Action a) {
+        return new Action(a.executed(), a.reason());
     }
 
     private static String idOf(ItemStack stack) {
