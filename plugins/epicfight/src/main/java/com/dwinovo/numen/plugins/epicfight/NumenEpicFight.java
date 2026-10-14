@@ -18,6 +18,10 @@ import java.nio.file.Path;
  * {@code ServerPlayerPatch},本联动只在服务端驱动它,不需要挂任何 Forge 事件——模式切换、动作执行的同步包
  * 都由 Epic Fight 自己的网络层发给看得见她的客户端。{@code modBus} 因而用不上,只为和 {@code Builtin} 的
  * 接线形状保持一致而保留。
+ *
+ * <p>除了一套 {@code epicfight.fight.*} 工具外,这里还挂一个 {@link BattleReflex}:战斗模式下有怪近身就自动
+ * 举武器格挡、挨打自动翻滚,和本体的原版盾逻辑同一套形状。女仆是 NPC 靠 AI 目标做这些,同伴是假玩家,
+ * 只能经技能容器驱动——见 {@link BattleReflex}。
  */
 public final class NumenEpicFight {
 
@@ -30,6 +34,7 @@ public final class NumenEpicFight {
     public static void install(IEventBus modBus, Path skillsRoot) {
         NumenPlugins.register(NAMESPACE, numen -> {
             EpicFightApi.install(numen);
+            BattleReflex.watch(numen);
             if (skillsRoot != null) {
                 numen.bundleSkills(skillsRoot);
             }
