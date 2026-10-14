@@ -21,7 +21,7 @@ import yesman.epicfight.world.capabilities.item.CapabilityItem;
  * {@code PlayerPatch}/{@code CapabilityItem}/{@code SkillContainer} 驱动同伴。运行时那份由玩家
  * 自己装上的模组提供({@code compileOnly}),本插件不携带它一个字节。
  *
- * <h2>版本适配:对着 1.20.1 的 20.14.17(当前最新)写</h2>
+ * <h2>版本适配:1.20.1 的 20.14.x(以 20.14.17 编译)</h2>
  * <ul>
  *   <li>战斗模式是 {@code PlayerPatch.PlayerMode}(VANILLA/EPICFIGHT),经 {@code toMode(PlayerMode, boolean)}
  *       切换;{@code synchronize=true} 时 {@code ServerPlayerPatch} 会给看得见她的客户端发模式同步包,
@@ -32,6 +32,8 @@ import yesman.epicfight.world.capabilities.item.CapabilityItem;
  *   <li>基础攻击、翻滚、格挡分别是 {@code SkillSlots.BASIC_ATTACK / DODGE / GUARD} 三个容器里的
  *       {@code EpicFightSkills.BASIC_ATTACK / ROLL / GUARD}。</li>
  * </ul>
+ * <p>上面这些口子在 20.14.x 线上稳定(20.14.8–20.14.17),本插件只 {@code compileOnly} 依赖,
+ * 运行期用的就是玩家装的那一份,不必逐个小版本重新编译。</p>
  *
  * <h2>同伴身上为什么自然有这些能力</h2>
  * Epic Fight 按 {@code EntityType.PLAYER} 挂 {@code ServerPlayerPatch}(见它的 {@code EntityPatchProvider}),
@@ -80,18 +82,22 @@ public final class EpicFight {
 
     /**
      * 一件物品是不是 Epic Fight 认得的武器、什么类别、什么握法。
-     * 认得的判据是物品上真的挂了它的物品能力({@code ItemCapabilityProvider} 只给武器/配置过的物品挂)——
-     * 没挂就是 {@code recognized=false},哪怕它是一把原版剑的样式也照实说。
+     * 认得的判据是 {@code getItemStackCapability} 返回的不是 {@code CapabilityItem.EMPTY}——没挂能力、
+     * 空手都是 {@code recognized=false},哪怕它是一把原版剑的样式也照实说。补丁不在场时(没装 Epic Fight
+     * 或还没挂上)照给类别、握法留空,不硬算。
      */
     public static Weapon weaponOf(ItemStack stack, PlayerPatch<?> patch) {
-        boolean has = stack.getCapability(EpicFightCapabilities.CAPABILITY_ITEM).isPresent();
-        if (!has) {
+        CapabilityItem cap = EpicFightCapabilities.getItemStackCapability(stack);
+        if (cap.isEmpty()) {
             return new Weapon(false, "", "");
         }
-        CapabilityItem cap = EpicFightCapabilities.getItemStackCapability(stack);
         String category = cap.getWeaponCategory() == null ? "" : cap.getWeaponCategory().toString();
-        var style = cap.getStyle(patch);
-        return new Weapon(true, category, style == null ? "" : style.toString());
+        String style = "";
+        if (patch != null) {
+            var s = cap.getStyle(patch);
+            style = s == null ? "" : s.toString();
+        }
+        return new Weapon(true, category, style);
     }
 
     /** 基础攻击:按手上武器打出一段攻击动画,连续调用就是连击。要先在战斗模式。 */
@@ -147,11 +153,15 @@ public final class EpicFight {
         }
         grantIfMissing(container, EpicFightSkills.GUARD);
         FriendlyByteBuf args = new FriendlyByteBuf(Unpooled.buffer());
-        boolean done = on ? container.requestHold(patch, args) : container.requestCancel(patch, args);
-        if (!done) {
-            return new Action(false, on
-                    ? "cannot guard right now: no guardable weapon in hand, no stamina, or mid-action"
-                    : "nothing to release (not guarding)");
+        if (on) {
+            if (!container.requestHold(patch, args)) {
+                return new Action(false, "cannot guard right now: no guardable weapon in hand, no stamina, or mid-action");
+            }
+        } else {
+            if (!guarding(patch, container)) {
+                return new Action(false, "not guarding right now; nothing to lower");
+            }
+            container.requestCancel(patch, args);
         }
         return new Action(true, "");
     }

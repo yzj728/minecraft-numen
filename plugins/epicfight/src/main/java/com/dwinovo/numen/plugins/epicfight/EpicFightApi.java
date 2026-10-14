@@ -32,6 +32,9 @@ import java.util.Locale;
  * <p><b>什么时候用哪条路</b>:点名打谁、自卫,照旧 {@code numen.fight.attack} / {@code numen.fight.clear}
  * (战斗系统自己走位、自己打,战斗模式下的挥击一样生效);{@code epicfight.fight.*} 是动作级控制——演示、
  * 切磋、躲技能、摆架势,一次一个动作。
+ *
+ * <p><b>版本</b>:编译对着 Epic Fight 20.14.17(MC 1.20.1 线的最后一个版本),运行期用玩家装的那一份,
+ * 20.14.x 线上都能跑,不逐个小版本重新编译。
  */
 public final class EpicFightApi {
 
@@ -93,6 +96,7 @@ public final class EpicFightApi {
     @Fn("Your Epic Fight state: installed, mode, stamina, guard, and the weapon in your main hand.")
     @Example("epicfight.fight.status()")
     @Note("Read-only. mode is \"battle\" or \"vanilla\"; stamina is what dodge and guard cost.")
+    @Note("Compatible with Epic Fight 20.14.x for Minecraft 1.20.1 (built against 20.14.17).")
     @SeeAlso({"epicfight.fight.mode", "epicfight.fight.weapon"})
     public static Status status(ServerCall call) {
         NumenPlayer her = call.her();
