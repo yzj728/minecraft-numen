@@ -28,6 +28,8 @@ import com.dwinovo.numen.task.Preparation;
 import com.dwinovo.numen.task.TaskState;
 import com.dwinovo.numen.api.combat.Firearms;
 import com.dwinovo.numen.api.combat.RangedFirearm;
+import com.dwinovo.numen.api.combat.MeleeStyle;
+import com.dwinovo.numen.api.combat.MeleeStyles;
 
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
@@ -56,6 +58,7 @@ import com.dwinovo.numen.pathing.body.BodyCompat;
  * 挥击(冷却与无敌帧)、射击(弹道与拉弓)、躲避(势场),各自是真正不同的东西;
  * 选哪一套则只有一处判据 {@link AttackPlan},本能链用的也是同一处。枪械(经 {@link Firearms}
  * 注册)走远程那一套:拿起就打,不用拉弓,状态机(拉栓/换弹/开镜/冷却)由枪械插件自己摆。
+ * 近战动作模组(史诗战斗这类,经 {@link MeleeStyles} 注册)接管挥击:它自己放攻击动画、算伤害、卡节奏。
  *
  * <h2>枪的战斗环是枪自己的</h2>
  * 弓的环固定在 8~12 格(拉弓要时间、箭有效距离短)。枪不用拉弓,交战距离按枪型给
@@ -550,6 +553,9 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
      * <p><b>枪手不挥拳</b>:远程武器是枪时这里直接让位——拿枪贴脸挥击只会把目标惊跑,
      * 开枪才是这场仗的事。
      *
+     * <p><b>近战动作模组(史诗战斗)接管挥击</b>:经 {@link MeleeStyles} 登记的那位在这里
+     * 先被问,它接管时自己放攻击动画、算伤害、卡节奏,和真人按键同一条路。
+     *
      * @param field 这一刻的局面,复用 onTick 已经扫好的那份
      */
     private void tickWeapon(Battlefield field) {
@@ -592,6 +598,16 @@ public final class AttackCompanionTask extends AbstractCompanionTask<AttackTaskR
             Hotbar.hold(player, loadout.melee().slot());
         }
         boolean weaponChanged = player.getMainHandItem() != before;
+        // 近战被史诗战斗这类模组接管时,挥击交给它:它自己放攻击动画、算伤害、卡节奏,和真人按键同一条路。
+        if (victim instanceof LivingEntity livingVictim) {
+            MeleeStyle melee = MeleeStyles.of(player, livingVictim);
+            if (melee != null) {
+                if (!weaponChanged && melee.strike(player, livingVictim)) {
+                    r.strike(victim.getId());
+                }
+                return;
+            }
+        }
         if (!Swing.mayStrike(weaponChanged, victim instanceof LivingEntity hurt && hurt.hurtTime > 0,
                 player.getAttackStrengthScale(0.0f))) {
             return;
