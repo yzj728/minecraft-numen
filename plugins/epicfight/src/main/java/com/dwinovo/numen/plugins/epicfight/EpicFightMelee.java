@@ -14,17 +14,17 @@ import yesman.epicfight.world.capabilities.entitypatch.player.ServerPlayerPatch;
  * core 的 {@code AttackCompanionTask} 在挥击那一刻问到这里,于是模型派的 {@code numen.fight.attack} 与
  * 自卫本能开的同一场仗都用这套打法。伤害由史诗战斗的 {@code AttackAnimation} 攻击帧自动结算。
  *
- * <p>只在 battle 模式接管;vanilla 模式 {@link #applies} 返回 false,原版挥击照旧,枪械(远程路径)也不受影响。
+ * <p>招式多样性照女仆:近距离轮换普通连击,稍远放冲刺攻击(见 {@link EpicFight#swing})。
+ * 只在 battle 模式接管;vanilla 模式 {@link #applies} 返回 false,原版挥击照旧,枪械(远程路径)也不受影响。
  */
 final class EpicFightMelee implements MeleeStyle {
 
     private static final Logger LOG = LoggerFactory.getLogger("numen-epicfight");
 
-    /** 连击序号:每次挥击 +1,由 {@link EpicFight#swing} 对武器连击表取模。单例跨同伴共享,
-     *  只影响连击动画的序号连续性,不影响正确性(伤害与动画照常)。 */
+    /** 连击序号:每次挥击 +1,由 {@link EpicFight#swing} 对武器连击表的普通段数取模。 */
     private int comboStep;
 
-    /** 只记一次“接管了挥击”:证明这条路径真的走到了,不是每次挥击都有一行。 */
+    /** 只记一次“接管了挥击”:证明这条路径真的走到了。 */
     private boolean takeoverLogged;
 
     @Override
@@ -46,7 +46,7 @@ final class EpicFightMelee implements MeleeStyle {
         }
         InputDriver.lookAt(fighter, target.getEyePosition());
         fighter.setSprinting(false);
-        EpicFight.Action done = EpicFight.swing(fighter, comboStep);
+        EpicFight.Action done = EpicFight.swing(fighter, target, comboStep);
         if (done.executed()) {
             comboStep++;
             if (!takeoverLogged) {
@@ -55,8 +55,7 @@ final class EpicFightMelee implements MeleeStyle {
             }
             return true;
         }
-        // 没放出去:大多数时候是“上一段动画还没完”(连击节奏由史诗战斗自己卡),这不是错;
-        // 只把真的失败(没体力/不在战斗模式/没动画)记下来,方便排查。
+        // 没放出去:大多数时候是“上一段动画还没完”(连击节奏由史诗战斗自己卡),这不是错。
         if (LOG.isDebugEnabled()) {
             LOG.debug("攻击动画未播放: {}", done.reason());
         }

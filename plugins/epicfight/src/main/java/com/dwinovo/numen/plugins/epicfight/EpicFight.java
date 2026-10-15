@@ -3,10 +3,12 @@ package com.dwinovo.numen.plugins.epicfight;
 import io.netty.buffer.Unpooled;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import yesman.epicfight.api.animation.AnimationManager.AnimationAccessor;
 import yesman.epicfight.api.animation.types.AttackAnimation;
+import yesman.epicfight.gameasset.Animations;
 import yesman.epicfight.gameasset.EpicFightSkills;
 import yesman.epicfight.skill.Skill;
 import yesman.epicfight.skill.SkillContainer;
@@ -27,35 +29,23 @@ import java.util.List;
  * 自己装上的模组提供({@code compileOnly}),本插件不携带它一个字节。
  *
  * <h2>版本适配:1.20.1 的 20.14.x(以 20.14.17 编译)</h2>
- * <ul>
- *   <li>战斗模式是 {@code PlayerPatch.PlayerMode}(VANILLA/EPICFIGHT),经 {@code toMode(PlayerMode, boolean)}
- *       切换;{@code synchronize=true} 时 {@code ServerPlayerPatch} 会给看得见她的客户端发模式同步包,
- *       第三人称渲染按模式换姿势。</li>
- *   <li>技能执行走 {@code SkillContainer.requestCasting / requestHold / requestCancel}——这是 20.9+ 的
- *       公开口子,内部自己做 {@code canUse} 检查(状态、资源、冷却)并把动画包发给跟踪客户端,和真人按键
- *       走的是同一条服务器路径。</li>
- *   <li>基础攻击、翻滚、格挡分别是 {@code SkillSlots.BASIC_ATTACK / DODGE / GUARD} 三个容器里的
- *       {@code EpicFightSkills.BASIC_ATTACK / ROLL / GUARD}。</li>
- * </ul>
- * <p>上面这些口子在 20.14.x 线上稳定(20.14.8–20.14.17),本插件只 {@code compileOnly} 依赖,
- * 运行期用的就是玩家装的那一份,不必逐个小版本重新编译。</p>
+ * 同上,只 {@code compileOnly},运行期用玩家装的那一份。
  *
- * <h2>攻击为什么不走 BASIC_ATTACK 技能容器,而是直接放动画</h2>
- * 技能容器({@code requestCasting})是给<b>真人玩家</b>搓招用的:它查 {@code SkillDataManager} 里的连击
- * 计数、查各种玩家状态。同伴是假玩家,不是真人,不搓招——照车万女仆(NPC)适配的做法,直接
- * {@link #swing} 拿武器连击表里的一段动画、{@code playAnimationSynchronized} 放出去,伤害由史诗战斗的
- * {@code AttackAnimation} 攻击帧管线自动结算(和女仆的 {@code AnimatedAttackGoal} 同一层,只是女仆用
- * {@code MobPatch},我们用 {@code ServerPlayerPatch},两者都继承 {@code LivingEntityPatch}、都有这套口子)。
+ * <h2>攻击、翻滚为什么直接放动画,不经技能容器</h2>
+ * 技能容器({@code requestCasting})是给<b>真人玩家</b>搓招用的:它查连击计数器、查各种玩家状态。同伴是假玩家,
+ * 不是真人、不搓招——照车万女仆(NPC)适配的做法,直接拿武器连击表里的一段动画
+ * {@code playAnimationSynchronized} 放出去,伤害由史诗战斗的 {@code AttackAnimation} 攻击帧管线自动结算。
+ * 女仆用 {@code MobPatch},我们用 {@code ServerPlayerPatch},两者都继承 {@code LivingEntityPatch}、都有这套口子。
  *
- * <h2>同伴身上为什么自然有这些能力</h2>
- * Epic Fight 按 {@code EntityType.PLAYER} 挂 {@code ServerPlayerPatch}(见它的 {@code EntityPatchProvider}),
- * 同伴是 {@code ServerPlayer} 的假玩家,入世时自动获得补丁;体力数据在 {@code Player} 的静态初始化与
- * {@code defineSynchedData} 里由它的 mixin 定义,同样自然就有。翻滚/格挡技能原版生存玩家要读技能书学,
- * 同伴是机器人,首次用的时候直接授进容器。
+ * <p>格挡例外:它要拦正面伤害({@code GuardSkill} 注册的伤害拦截靠 hold 状态),不是单纯一段动画,所以仍走
+ * {@code requestHold}/{@code requestCancel}。
  */
 public final class EpicFight {
 
     private EpicFight() {}
+
+    /** 超过这个距离就放冲刺攻击(DASH),否则放普通连击。与女仆 SWORD_DASH 的 withinDistance(1.0, 2.5) 同量级。 */
+    private static final double DASH_DISTANCE = 2.5;
 
     /** 一件物品在 Epic Fight 眼里的样子。 */
     public record Weapon(boolean recognized, String category, String style) {}
@@ -94,9 +84,7 @@ public final class EpicFight {
 
     /**
      * 一件物品是不是 Epic Fight 认得的武器、什么类别、什么握法。
-     * 认得的判据是 {@code getItemStackCapability} 返回的不是 {@code CapabilityItem.EMPTY}——没挂能力、
-     * 空手都是 {@code recognized=false},哪怕它是一把原版剑的样式也照实说。补丁不在场时(没装 Epic Fight
-     * 或还没挂上)照给类别、握法留空,不硬算。
+     * 认得的判据是 {@code getItemStackCapability} 返回的不是 {@code CapabilityItem.EMPTY}。
      */
     public static Weapon weaponOf(ItemStack stack, PlayerPatch<?> patch) {
         CapabilityItem cap = EpicFightCapabilities.getItemStackCapability(stack);
@@ -113,16 +101,18 @@ public final class EpicFight {
     }
 
     /**
-     * 直接放一段攻击动画——<b>照 NPC(女仆)的逻辑,不经 BASIC_ATTACK 技能容器</b>。
+     * 直接放一段攻击动画——<b>照女仆 NPC 的逻辑,不经 BASIC_ATTACK 技能容器</b>。
      *
-     * <p>拿主手武器的连击表({@code CapabilityItem.getAutoAttackMotion})里 {@code comboIndex} 那一格,
-     * {@code playAnimationSynchronized} 放出去;伤害由史诗战斗的 {@code AttackAnimation} 攻击帧自动结算,
-     * 动画包发给所有看得见她的客户端。连击序号由调用方维护(战斗系统自己累加)。
+     * <p>连击表结构是 {@code [AUTO1..AUTOn, DASH, AIR_SLASH]}(末尾两段是冲刺与空中攻击)。按距离选招:
+     * <ul>
+     *   <li>距离 {@code > DASH_DISTANCE}:放 {@code DASH}(倒数第二段)——冲刺接近,和女仆的冲刺技同一层;</li>
+     *   <li>否则:放普通连击 {@code AUTO}(第 {@code comboStep % (size-2)} 段),连续调用就是连击。</li>
+     * </ul>
+     * 伤害由史诗战斗的 {@code AttackAnimation} 攻击帧自动结算,动画包发给所有看得见她的客户端。
      *
-     * <p>末尾两段是冲刺攻击与空中攻击,普通连击只在 {@code [0, size-2)} 里循环,和原版
-     * {@code BasicAttack.executeOnServer} 的取法一致。
+     * @param comboStep 连击序号,由调用方维护、每次成功挥击 +1;这里对普通连击段数取模
      */
-    public static Action swing(Player player, int comboIndex) {
+    public static Action swing(Player player, LivingEntity target, int comboStep) {
         ServerPlayerPatch patch = patchOf(player);
         if (patch == null) {
             return new Action(false, "epic fight is not installed or has no player patch");
@@ -138,18 +128,35 @@ public final class EpicFight {
         if (combo == null || combo.isEmpty()) {
             return new Action(false, "no attack animation for the item in hand");
         }
-        int normalSize = Math.max(1, combo.size() - 2);
-        AnimationAccessor<? extends AttackAnimation> motion = combo.get(Math.floorMod(comboIndex, normalSize));
+        int size = combo.size();
+        // 普通连击段数 = size - 2(末尾两段固定是 DASH 与 AIR);至少 1,避免长矛单手/太刀收鞘这类只有 1 段普通攻击的武器除零
+        int normalSize = Math.max(1, size - 2);
+        int dashIndex = size - 2;
+        double distance = target == null ? 0.0 : player.distanceTo(target);
+        AnimationAccessor<? extends AttackAnimation> motion;
+        if (distance > DASH_DISTANCE && size >= 3) {
+            // 冲刺攻击:朝目标冲刺(动画自带的坐标属性会追踪目标),并把目标登记给它
+            motion = combo.get(dashIndex);
+            if (target != null) {
+                patch.setAttackTarget(target);
+            }
+        } else {
+            // 普通连击:在普通段里轮换
+            motion = combo.get(Math.floorMod(comboStep, normalSize));
+        }
         patch.playAnimationSynchronized(motion, 0.0F);
         return new Action(true, "");
     }
 
-    /** 基础攻击:直接放第一段攻击动画(照 NPC 逻辑,不搓招)。 */
+    /** 基础攻击:无目标的简单挥击(放第一段连击)。 */
     public static Action attack(Player player) {
-        return swing(player, 0);
+        return swing(player, null, 0);
     }
 
-    /** 翻滚:朝前方(forward=true)或后方(forward=false)翻滚躲闪。要先在战斗模式。 */
+    /**
+     * 翻滚躲闪:<b>直接放翻滚动画</b>(照女仆 NPC 直接放动画的逻辑,不经 ROLL 技能容器)。
+     * {@code forward=true} 朝前滚,{@code false} 朝后滚。要先在战斗模式。
+     */
     public static Action dodge(Player player, boolean forward) {
         ServerPlayerPatch patch = patchOf(player);
         if (patch == null) {
@@ -158,19 +165,15 @@ public final class EpicFight {
         if (!patch.isEpicFightMode()) {
             return new Action(false, "not in battle mode; epicfight.fight.mode(\"battle\") first");
         }
-        SkillContainer container = patch.getSkill(SkillSlots.DODGE);
-        if (container == null || EpicFightSkills.ROLL == null) {
-            return new Action(false, "the roll dodge skill is unavailable");
-        }
-        grantIfMissing(container, EpicFightSkills.ROLL);
-        // 照游戏客户端同款的参数格式:方向(0=前滚,1=后滚)+ 朝向角
-        FriendlyByteBuf args = new FriendlyByteBuf(Unpooled.buffer());
-        args.writeInt(forward ? 0 : 1);
-        args.writeFloat(player.getYRot());
-        return cast(container, patch, args);
+        patch.playAnimationSynchronized(
+                forward ? Animations.BIPED_ROLL_FORWARD : Animations.BIPED_ROLL_BACKWARD, 0.0F);
+        return new Action(true, "");
     }
 
-    /** 格挡:举起武器挡正面近战(on=false 放下)。要先在战斗模式,手上要有能格挡的武器。 */
+    /**
+     * 格挡:举起武器挡正面近战(on=false 放下)。要先在战斗模式,手上要有能格挡的武器。
+     * 仍走技能容器——格挡要拦正面伤害({@code GuardSkill} 的伤害拦截靠 hold 状态),不是单纯一段动画。
+     */
     public static Action guard(Player player, boolean on) {
         ServerPlayerPatch patch = patchOf(player);
         if (patch == null) {
@@ -198,26 +201,10 @@ public final class EpicFight {
         return new Action(true, "");
     }
 
-    /** 技能没学过就补进容器:同伴是机器人,翻滚/格挡直接授,不像生存玩家要读技能书。 */
+    /** 技能没学过就补进容器:同伴是机器人,格挡直接授,不像生存玩家要读技能书。 */
     private static void grantIfMissing(SkillContainer container, Skill skill) {
         if (skill != null && container.isEmpty()) {
             container.setSkill(skill);
         }
-    }
-
-    /** 施放一段技能:内部做 canUse 检查(状态、资源)并给跟踪客户端发动画包。 */
-    private static Action cast(SkillContainer container, ServerPlayerPatch patch) {
-        return cast(container, patch, new FriendlyByteBuf(Unpooled.buffer()));
-    }
-
-    private static Action cast(SkillContainer container, ServerPlayerPatch patch, FriendlyByteBuf args) {
-        if (container.isEmpty()) {
-            return new Action(false, "the skill is not available on this character");
-        }
-        if (!container.requestCasting(patch, args)) {
-            return new Action(false, "cannot do it right now: busy animation, no stamina, or the state does not "
-                    + "allow it — wait a moment and try again");
-        }
-        return new Action(true, "");
     }
 }

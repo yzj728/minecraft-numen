@@ -20,10 +20,9 @@ import java.nio.file.Path;
  * 都由 Epic Fight 自己的网络层发给看得见她的客户端。{@code modBus} 因而用不上,只为和 {@code Builtin} 的
  * 接线形状保持一致而保留。
  *
- * <p>除了一套 {@code epicfight.fight.*} 工具外,还挂两样:一个 {@link BattleReflex}(战斗模式下有怪近身就自动
- * 举武器格挡、挨打自动翻滚,和本体的原版盾逻辑同一套形状),以及一个 {@link EpicFightMelee}(把战斗模式下的
- * 近战挥击接管到史诗战斗的 {@code BASIC_ATTACK} 技能,让 numen.fight.attack 与自卫本能都有真正的挥砍动画)。
- * 女仆是 NPC 靠 AI 目标做这些,同伴是假玩家,只能经技能容器驱动——见 {@link BattleReflex}。
+ * <p>除了一套 {@code epicfight.fight.*} 工具外,还挂三样:<b>{@link EpicFightMelee}</b>(把战斗模式下的近战挥击
+ * 接管成直接放攻击动画)、<b>{@link BattleReflex}</b>(近身自动格挡、挨打自动翻滚)、<b>{@link BattleMotionSync}</b>
+ * (把移动输入同步成 dx/dz,让客户端播走路动画)。女仆是 NPC 靠 AI 目标做这些,同伴是假玩家,只能经补丁直接驱动。
  */
 public final class NumenEpicFight {
 
@@ -39,6 +38,7 @@ public final class NumenEpicFight {
         NumenPlugins.register(NAMESPACE, numen -> {
             EpicFightApi.install(numen);
             BattleReflex.watch(numen);
+            BattleMotionSync.watch(numen);
             if (skillsRoot != null) {
                 numen.bundleSkills(skillsRoot);
             }
