@@ -30,6 +30,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.TickTask;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.phys.Vec3;
 
 import java.util.List;
 import java.util.Locale;
@@ -44,6 +45,7 @@ import java.util.function.Predicate;
  * <pre>
  *   /numen player summon &lt;name&gt;    summon the named companion (idempotent — reuses an existing one)
  *   /numen player despawn &lt;name&gt;   permanently dismiss the named companion (gone for good)
+ *   /numen player recall &lt;name&gt;    teleport the named companion to a safe spot near you (卡住时的兜底)
  *   /numen settings                  open the settings GUI on the caller's client
  *   /numen reset                     clear the caller's conversation loops
  *   /numen drive &lt;companion&gt; &lt;program&gt; (op) run a Lua program as her, through the same entry as her own;
@@ -87,7 +89,10 @@ public final class NumenCommands {
                                 .executes(ctx -> summon(ctx, StringArgumentType.getString(ctx, "name")))))
                 .then(Commands.literal("despawn")
                         .then(Commands.argument("name", StringArgumentType.word())
-                                .executes(ctx -> despawn(ctx, StringArgumentType.getString(ctx, "name"))))));
+                                .executes(ctx -> despawn(ctx, StringArgumentType.getString(ctx, "name")))))
+                .then(Commands.literal("recall")
+                        .then(Commands.argument("name", StringArgumentType.word())
+                                .executes(ctx -> recall(ctx, StringArgumentType.getString(ctx, "name"))))));
         graft(dispatcher, Commands.literal("settings")
                 .executes(ctx -> clientAction(ctx, ClientUiActionPayload.Action.OPEN_SETTINGS)));
         graft(dispatcher, Commands.literal("reset")
@@ -203,6 +208,38 @@ public final class NumenCommands {
                 ? Component.translatable(Keys.COMMAND_DISMISSED_DUPLICATES, name, dismissed)
                 : Component.translatable(Keys.COMMAND_DISMISSED, name), false);
         return dismissed;
+    }
+
+    /**
+     * 保底:把她传到主人身边一处安全落点。寻路在深水、狭窄地形里会打转或上不了岸,主人走不开时用这一条直接把人捞回来。
+     * 落点找法和复活同一个 {@link SafeSpawn}(近处找开阔、脚下有整块、头脚不泡水);找不到就照实说,不硬塞进墙里。
+     */
+    private static int recall(CommandContext<CommandSourceStack> ctx, String name)
+            throws CommandSyntaxException {
+        ServerPlayer owner = ctx.getSource().getPlayerOrException();
+        ServerLevel level = (ServerLevel) owner.level();
+        NumenPlayer companion = null;
+        for (ServerPlayer player : owner.getServer().getPlayerList().getPlayers()) {
+            if (player instanceof NumenPlayer body && body.isOwnedByPlayer(owner.getUUID())
+                    && body.getName().getString().equals(name)) {
+                companion = body;
+            }
+        }
+        if (companion == null) {
+            ctx.getSource().sendFailure(Component.translatable(Keys.COMMAND_YOURS_NOT_HERE, name));
+            return 0;
+        }
+        Vec3 pos = SafeSpawn.findNear(level, owner.position());
+        if (pos == null && owner.onGround() && SafeSpawn.hasStandingRoom(level, owner.position())) {
+            pos = owner.position();
+        }
+        if (pos == null) {
+            ctx.getSource().sendFailure(Component.literal("你身边没有能落脚的位子,走到开阔一点再试"));
+            return 0;
+        }
+        companion.teleportTo(level, pos.x, pos.y, pos.z, companion.getYRot(), companion.getXRot());
+        ctx.getSource().sendSuccess(() -> Component.literal("已把 " + name + " 传送到你身边"), false);
+        return 1;
     }
 
     private static int clientAction(CommandContext<CommandSourceStack> ctx,
