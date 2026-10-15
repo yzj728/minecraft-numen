@@ -18,6 +18,8 @@ import net.minecraft.world.phys.Vec3;
  * 0.02(疾跑 0.026),速度每刻乘 0.91。
  *
  * <p>只在脚踏实地时转身;腾空时不回身,按身体此刻朝着的方向前进或后退来修正——空中转过身去,落地就是背对着路。
+ * <b>水里也转身</b>:身体泡在水里时 {@code onGround} 恒为 false,不补这一下它就只朝旧方向游,永远对不齐目标列——
+ * 原地打转、上不了岸的根因。
  */
 final class Steering {
 
@@ -33,9 +35,14 @@ final class Steering {
 
     private Steering() {}
 
+    /** 身体这一刻站在地上、或泡在水里(水里的转向同样要朝目标,见类注释)。 */
+    private static boolean canSteer(ServerPlayer body) {
+        return body.onGround() || body.isInWater();
+    }
+
     /** 不减速地朝 {@code (x, z)} 走。 */
     static void pass(ServerPlayer body, Controls keys, double x, double z) {
-        if (body.onGround()) {
+        if (canSteer(body)) {
             Aim.faceToward(body, x, z);
         }
         keys.press(Key.FORWARD);
@@ -79,8 +86,8 @@ final class Steering {
         if (distance < AT && speed < REST * 10) {
             return true;
         }
-        // 只在地上转身;腾空时不回身,沿身体此刻朝着的方向按前进后退修正
-        if (distance >= AT && body.onGround()) {
+        // 地上、水里都转身;腾空(真正的坠落,不在水里)时不回身
+        if (distance >= AT && canSteer(body)) {
             Aim.faceToward(body, x, z);
         }
         double yaw = Math.toRadians(body.getYRot());
@@ -88,7 +95,8 @@ final class Steering {
         double fz = Math.cos(yaw);
         double ahead = dx * fx + dz * fz;
         double along = motion.x * fx + motion.z * fz;
-        int airLeft = body.onGround() ? 0 : ticksToLand(body.getY(), motion.y, landingY, BodyCompat.gravity(body));
+        // 泡在水里不按"空中落到 landingY"推算——水里有浮力、不下落,那一套会算出整整 HORIZON 刻的空气滑行
+        int airLeft = body.onGround() || body.isInWater() ? 0 : ticksToLand(body.getY(), motion.y, landingY, BodyCompat.gravity(body));
         double groundAccel = groundAccel(body);
         double groundFriction = friction(body) * 0.91;
         double airAccel = (body.isSprinting() ? 0.026 : 0.02) * 0.98;
