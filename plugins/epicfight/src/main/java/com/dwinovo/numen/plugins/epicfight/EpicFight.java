@@ -2,8 +2,11 @@ package com.dwinovo.numen.plugins.epicfight;
 
 import io.netty.buffer.Unpooled;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
+import yesman.epicfight.api.animation.AnimationManager.AnimationAccessor;
+import yesman.epicfight.api.animation.types.AttackAnimation;
 import yesman.epicfight.gameasset.EpicFightSkills;
 import yesman.epicfight.skill.Skill;
 import yesman.epicfight.skill.SkillContainer;
@@ -12,6 +15,8 @@ import yesman.epicfight.world.capabilities.EpicFightCapabilities;
 import yesman.epicfight.world.capabilities.entitypatch.player.PlayerPatch;
 import yesman.epicfight.world.capabilities.entitypatch.player.ServerPlayerPatch;
 import yesman.epicfight.world.capabilities.item.CapabilityItem;
+
+import java.util.List;
 
 /**
  * 本插件对接 Epic Fight(史诗战斗)的那一面——<b>唯一</b>知道 Epic Fight 类型的地方,别处(API、技能、入口)都不碰它的类。
@@ -34,6 +39,13 @@ import yesman.epicfight.world.capabilities.item.CapabilityItem;
  * </ul>
  * <p>上面这些口子在 20.14.x 线上稳定(20.14.8–20.14.17),本插件只 {@code compileOnly} 依赖,
  * 运行期用的就是玩家装的那一份,不必逐个小版本重新编译。</p>
+ *
+ * <h2>攻击为什么不走 BASIC_ATTACK 技能容器,而是直接放动画</h2>
+ * 技能容器({@code requestCasting})是给<b>真人玩家</b>搓招用的:它查 {@code SkillDataManager} 里的连击
+ * 计数、查各种玩家状态。同伴是假玩家,不是真人,不搓招——照车万女仆(NPC)适配的做法,直接
+ * {@link #swing} 拿武器连击表里的一段动画、{@code playAnimationSynchronized} 放出去,伤害由史诗战斗的
+ * {@code AttackAnimation} 攻击帧管线自动结算(和女仆的 {@code AnimatedAttackGoal} 同一层,只是女仆用
+ * {@code MobPatch},我们用 {@code ServerPlayerPatch},两者都继承 {@code LivingEntityPatch}、都有这套口子)。
  *
  * <h2>同伴身上为什么自然有这些能力</h2>
  * Epic Fight 按 {@code EntityType.PLAYER} 挂 {@code ServerPlayerPatch}(见它的 {@code EntityPatchProvider}),
@@ -100,8 +112,17 @@ public final class EpicFight {
         return new Weapon(true, category, style);
     }
 
-    /** 基础攻击:按手上武器打出一段攻击动画,连续调用就是连击。要先在战斗模式。 */
-    public static Action attack(Player player) {
+    /**
+     * 直接放一段攻击动画——<b>照 NPC(女仆)的逻辑,不经 BASIC_ATTACK 技能容器</b>。
+     *
+     * <p>拿主手武器的连击表({@code CapabilityItem.getAutoAttackMotion})里 {@code comboIndex} 那一格,
+     * {@code playAnimationSynchronized} 放出去;伤害由史诗战斗的 {@code AttackAnimation} 攻击帧自动结算,
+     * 动画包发给所有看得见她的客户端。连击序号由调用方维护(战斗系统自己累加)。
+     *
+     * <p>末尾两段是冲刺攻击与空中攻击,普通连击只在 {@code [0, size-2)} 里循环,和原版
+     * {@code BasicAttack.executeOnServer} 的取法一致。
+     */
+    public static Action swing(Player player, int comboIndex) {
         ServerPlayerPatch patch = patchOf(player);
         if (patch == null) {
             return new Action(false, "epic fight is not installed or has no player patch");
@@ -109,12 +130,23 @@ public final class EpicFight {
         if (!patch.isEpicFightMode()) {
             return new Action(false, "not in battle mode; epicfight.fight.mode(\"battle\") first");
         }
-        SkillContainer container = patch.getSkill(SkillSlots.BASIC_ATTACK);
-        if (container == null) {
-            return new Action(false, "no basic-attack skill slot");
+        if (!patch.getEntityState().canBasicAttack()) {
+            return new Action(false, "still in the previous attack animation — wait for it to finish");
         }
-        grantIfMissing(container, EpicFightSkills.BASIC_ATTACK);
-        return cast(container, patch);
+        CapabilityItem cap = patch.getHoldingItemCapability(InteractionHand.MAIN_HAND);
+        List<AnimationAccessor<? extends AttackAnimation>> combo = cap.getAutoAttackMotion(patch);
+        if (combo == null || combo.isEmpty()) {
+            return new Action(false, "no attack animation for the item in hand");
+        }
+        int normalSize = Math.max(1, combo.size() - 2);
+        AnimationAccessor<? extends AttackAnimation> motion = combo.get(Math.floorMod(comboIndex, normalSize));
+        patch.playAnimationSynchronized(motion, 0.0F);
+        return new Action(true, "");
+    }
+
+    /** 基础攻击:直接放第一段攻击动画(照 NPC 逻辑,不搓招)。 */
+    public static Action attack(Player player) {
+        return swing(player, 0);
     }
 
     /** 翻滚:朝前方(forward=true)或后方(forward=false)翻滚躲闪。要先在战斗模式。 */
