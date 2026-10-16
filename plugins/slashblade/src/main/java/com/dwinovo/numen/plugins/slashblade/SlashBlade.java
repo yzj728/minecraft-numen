@@ -25,34 +25,23 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 
 /**
  * 本插件对接拔刀剑(SlashBlade:Resharped)的那一面——<b>唯一</b>知道拔刀剑类型的地方,别处(API、技能、入口)
  * 都不碰它的类。
  *
- * <h2>版本基准:1.1.23(1.20.1 线,整合包实际在用)</h2>
- * 这一代每一招都是一个 {@link ComboState} 状态机链:进场调 {@code clickAction}、持续期间每 tick 调
- * {@code tickAction}(按 {@code TimeLineTickAction} 的时间线放出多段刀光 / 位移 / 收刀 / 命中眩晕),
- * 到点按 {@code nextOfTimeout} 自动衔接下一段。真玩家靠 {@link ItemSlashBlade#inventoryTick} 里的
- * {@code cs.tickAction(living)} 逐 tick 驱动;假玩家没有这条被动链,由 {@link SlashBladeTicker} 在服务端
- * 每 tick 复现同一条链(见该类)。
+ * <h2>核心:直接释放招式,不搓连段</h2>
+ * 拔刀剑每一招就是一个 {@link ComboState} 状态机:进场调 {@code clickAction}(第一击)、持续期每 tick 调
+ * {@code tickAction}(多段刀光/位移/收刀/眩晕)、到点按 {@code nextOfTimeout} 自动衔接下一段。所谓「放一招」就是
+ * {@code updateComboSeq(entity, 那一招的 combo key)} 切过去——进场即放第一击,后续由 {@link SlashBladeTicker}
+ * 逐 tick 播完。所以「直接释放」= 直接指定招式名 → 切到对应 combo,<b>完全绕开玩家的蓄力判定和 {@code doArts}
+ * 的档位抽象</b>。这里 {@link #release} 就干这一件事。
  *
- * <h2>放剑技的正确链路(照车万女仆「真正的力量」的 {@code SlashBladeAttackUtils.doSlashArts})</h2>
- * 放一次剑技不是「doArts 拿 combo、updateComboSeq 切过去」三行就完事——中间有一环<b>必须</b>:
- * <ol>
- *   <li>{@code lookAt(FEET, target)} 面向目标(它朝面朝方向放,不面向等于空放);</li>
- *   <li>{@code getSlashArts().doArts(type, user)} 拿目标 combo;</li>
- *   <li><b>post {@link SlashBladeEvent.PerformSlashArtEvent}</b>——这是拔刀剑释放剑技的事件钩子,别的模组
- *       和拔刀剑自己都靠它。跳过它,最后的收尾段就出不来;</li>
- *   <li>取 {@code event.getComboState()}(事件可能改写),判非取消、非 NONE,再 {@code updateComboSeq}。</li>
- * </ol>
- * 上一版漏了第 3 步,导致「起手能放、最后的收尾段放不出」。
- *
- * <h2>预制招式:绕开蓄力,按「档」取招</h2>
- * 真人放 SA 要长按右键、按蓄力时长判「普通/完美/失败」,完美窗口只有 3~4 tick。但程序不经过那条判定:
- * {@link SlashArts#doArts} 按 {@code ArtsType} 直接返回目标 combo,{@code elapsed} 只是喂给事件的一个口径
- * (完美=10、普通=20,照车万女仆),不影响成败。超SA 走 {@link SuperSlashArts#releaseSSA}(额外耗一半耐久)。
+ * <h2>放 SA 的正确链路(照车万女仆「真正的力量」{@code SlashBladeAttackUtils.doSlashArts})</h2>
+ * 放剑技有一步<b>必须</b>:post {@link SlashBladeEvent.PerformSlashArtEvent}(拔刀剑释放剑技的事件钩子,别的模组
+ * 和它自己都靠它)。跳过它,最后的收尾段就出不来。{@link #doArt} 走这一步;{@link #release} 走「直接切 combo」的路(用于非 SA 招式)。
  */
 public final class SlashBlade {
 
@@ -162,10 +151,6 @@ public final class SlashBlade {
 
     /**
      * 放一次剑技,带目标——放之前 {@code lookAt(FEET, target)} 面向它。{@code target} 为 null 时不面向。
-     *
-     * <p><b>完全预制、绕开蓄力</b>:普通/完美直接经 {@link SlashArts#doArts} 按档位拿 combo、post
-     * {@link SlashBladeEvent.PerformSlashArtEvent}、切过去,多段由 {@link SlashBladeTicker} 逐 tick 播完;
-     * 超SA 走官方 {@link SuperSlashArts#releaseSSA}。{@code random} 时按刀状态随机挑档。
      */
     public static Art art(LivingEntity entity, ItemStack blade, String type, Entity target) {
         if (!isSlashBlade(blade)) {
@@ -175,7 +160,6 @@ public final class SlashBlade {
             entity.lookAt(EntityAnchorArgument.Anchor.FEET, target.position());
         }
         String t = type == null ? "random" : type.toLowerCase(Locale.ROOT);
-        // random 要在「放超SA」上走 releaseSSA,不能把 Super 混进 doArts 的普通/完美里(那会绕开耐久消耗)
         if ("random".equals(t)) {
             if (canSuper(blade, entity) && entity.getRandom().nextBoolean()) {
                 return superArtImpl(entity, blade);
@@ -198,10 +182,7 @@ public final class SlashBlade {
         }).orElse(new Art(false, "", "the slash blade has no blade state"));
     }
 
-    /**
-     * 放一次普通/完美剑技——照车万女仆 {@code SlashBladeAttackUtils.doSlashArts}:post
-     * {@link SlashBladeEvent.PerformSlashArtEvent},取事件改写的 combo 再切。超SA 不走这里(要耗一半耐久)。
-     */
+    /** 放一次普通/完美剑技——照车万女仆 doSlashArts:post PerformSlashArtEvent,取改写的 combo 再切。 */
     private static Art doArt(LivingEntity entity, ISlashBladeState state, SlashArts.ArtsType artsType) {
         if (state.isBroken()) {
             return new Art(false, artOf(state), "the blade is broken; repair it first");
@@ -236,10 +217,39 @@ public final class SlashBlade {
         return new Action(done.executed(), done.reason());
     }
 
+    /** 招式名 → combo key 的映射(1.1.23 ComboStateRegistry 里确认的键)。 */
+    private static final Map<String, ResourceLocation> MOVES = Map.of(
+            "rapid_slash", ComboStateRegistry.RAPID_SLASH.getId(),      // 疾走居合:前冲+连续刀光
+            "upperslash", ComboStateRegistry.UPPERSLASH.getId(),        // 挑空
+            "upperslash_jump", ComboStateRegistry.UPPERSLASH_JUMP.getId(), // 跃升斩:升空+下劈
+            "aerial_cleave", ComboStateRegistry.AERIAL_CLEAVE.getId(),  // 空中下劈
+            "rising_star", ComboStateRegistry.RISING_STAR.getId()       // 晨星:上挑连击
+    );
+
+    /**
+     * <b>直接释放一个招式,完全跳过搓招/蓄力</b>。{@code move} 是招式名:
+     * {@code rapid_slash}(疾走居合)、{@code upperslash}(挑空)、{@code upperslash_jump}(跃升斩)、
+     * {@code aerial_cleave}(空中下劈)、{@code rising_star}(晨星)。直接 {@code updateComboSeq} 切到对应 combo,
+     * 进场即放第一击,后续多段由 {@link SlashBladeTicker} 逐 tick 播完。
+     */
+    public static Action release(LivingEntity entity, ItemStack blade, String move) {
+        if (!isSlashBlade(blade)) {
+            return new Action(false, "no slash blade in your main hand");
+        }
+        ResourceLocation combo = MOVES.get(move == null ? "" : move.toLowerCase(Locale.ROOT));
+        if (combo == null) {
+            return new Action(false, "unknown move: " + move
+                    + " (known: rapid_slash, upperslash, upperslash_jump, aerial_cleave, rising_star)");
+        }
+        return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
+            state.updateComboSeq(entity, combo);
+            entity.swing(InteractionHand.MAIN_HAND);
+            return new Action(true, "");
+        }).orElse(new Action(false, "the slash blade has no blade state"));
+    }
+
     /**
      * 放一整套连击(预制),由服务端随机选起手:地面随机进「普攻连段 A」或「疾走居合」,空中进「空中连段」。
-     * 起手后整条连段树由 {@link SlashBladeTicker} 逐 tick 自动推进、自动衔接、自动收刀——模型只喊
-     * {@code slashblade.blade.combo()},不用想套路。
      */
     public static Action combo(LivingEntity entity, ItemStack blade) {
         if (!isSlashBlade(blade)) {
@@ -258,8 +268,7 @@ public final class SlashBlade {
 
     /**
      * 逐 tick 推进刀当前的 combo 时间线——复现 {@code ItemSlashBlade.inventoryTick} 里
-     * {@code cs.tickAction(living)} 那一段,让多段刀光 / 位移 / 收刀 / 命中判定按拔刀剑自己的时间线放出来。
-     * 假玩家没有被动 tick 链,由 {@link SlashBladeTicker} 每服务端刻调用这里。
+     * {@code cs.tickAction(living)} 那一段。假玩家没有被动 tick 链,由 {@link SlashBladeTicker} 每服务端刻调用这里。
      */
     public static void tickAction(LivingEntity entity) {
         ItemStack blade = entity.getMainHandItem();
