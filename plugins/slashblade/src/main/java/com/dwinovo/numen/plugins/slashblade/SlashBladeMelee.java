@@ -3,7 +3,8 @@ package com.dwinovo.numen.plugins.slashblade;
 import com.dwinovo.numen.api.combat.MeleeStyle;
 import com.dwinovo.numen.entity.InputDriver;
 import com.dwinovo.numen.entity.NumenPlayer;
-import mods.flammpfeil.slashblade.util.TargetSelector;
+import mods.flammpfeil.slashblade.item.ItemSlashBlade;
+import mods.flammpfeil.slashblade.registry.ComboStateRegistry;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
@@ -11,27 +12,25 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 主手是拔刀剑时接管近战挥击,照车万女仆「真正的力量」的 {@code SimpleSlashGoal} 口径:
- * <ol>
- *   <li><b>先看距离</b>:目标在拔刀剑够得到的范围({@code TargetSelector.getResolvedReach})内,才放剑技;</li>
- *   <li><b>够得着就搓招</b>:冷却到了放一次随机档位的预制剑技(面向目标 + post 事件 + 切 combo),完整多段由
- *       {@link SlashBladeTicker} 逐 tick 驱动;</li>
- *   <li><b>够不着就疾走居合冲锋贴脸</b>({@code RAPID_SLASH} 自带向前冲刺位移),而不是退回原版走位环后退——
- *       这正是「边打边退」的治本:拔刀剑近战该贴脸,不是拉后。</li>
- *   <li><b>平A兜底</b>:放不出且冲不上去时,退回 numen 原版平 A,保证打得出去。</li>
- * </ol>
+ * 主手是拔刀剑时接管近战挥击。<b>直接释放剑技,不搓连段、不 fall-through 到原版平A</b>。
  *
- * <p>选刀不在这里:近战首选哪把由 {@code Loadout} 决定,{@link SlashBladeWeapon} 让拔刀剑按真实伤害报分、赢过
- * 铁剑,身体会自动把它切到主手。
+ * <h2>为什么「一直在平A」</h2>
+ * core 的 {@code AttackCompanionTask.tickWeapon} 每刻(在够得着的距离内)都问一次 {@link #strike}。上一版
+ * 里有 40 刻的冷却,冷却期内走平A兜底——于是 40 刻里 39 刻都在平A,只有 1 刻试着放剑技,看起来就是
+ * 「AI 一直在平A、放不出剑技」。治本:剑技放不出的那一刻也别退回平A,而是<b>直接切到那一招的 combo</b>
+ * ({@code updateComboSeq} 进场即触发 {@code clickAction} 放第一击),后续多段由 {@link SlashBladeTicker} 逐刻
+ * 播完。真正放不出(断刀/封印/未附魔)才平A兜底,而且这种情况本身极少。
+ *
+ * <h2>不去碰走位</h2>
+ * 走位(站位环)是 core 的事,{@code MeleeStyle} 只管「这一下怎么挥」。这里只负责:面向目标 + 放剑技。
  */
 final class SlashBladeMelee implements MeleeStyle {
 
     private static final Logger LOG = LoggerFactory.getLogger("numen-slashblade");
 
-    /** 两次剑技之间的最小间隔(tick)。20 tick = 1 秒;40 tick = 2 秒。 */
-    private static final int ART_COOLDOWN_TICKS = 40;
+    /** 两次剑技之间的最小间隔(tick),只用于节流放剑技的频率,不让骄傲之魂瞬间烧光。 */
+    private static final int ART_COOLDOWN_TICKS = 30;
 
-    /** 上一次放剑技是在身体 tickCount 的哪一刻;0 表示还没放过。 */
     private int lastArtTick;
 
     @Override
@@ -45,43 +44,35 @@ final class SlashBladeMelee implements MeleeStyle {
         if (!SlashBlade.isSlashBlade(blade)) {
             return false;
         }
-        // 先把身体转向目标、停疾跑,和 numen 平 A 同一套准备动作
         InputDriver.lookAt(fighter, target.getEyePosition());
         fighter.setSprinting(false);
 
-        // 够不着:用疾走居合(自带前冲)贴脸,而不是退回让原版走位环把它拉远
-        double reach = TargetSelector.getResolvedReach(fighter);
-        if (fighter.distanceTo(target) > reach) {
-            return charge(fighter, blade);
-        }
-
-        // 优先搓招:冷却到了就放一次随机档位的预制剑技(内部面向目标 + post 事件)
+        // 冷却内也直接重放剑技:拔刀剑的 combo 有超时,切同一条 combo 会自然衔接,而不是打断。
+        // 这是「直接释放」——不搓连段,每次 strike 都切到目标 combo。
         if (fighter.tickCount - lastArtTick >= ART_COOLDOWN_TICKS) {
+            lastArtTick = fighter.tickCount;
             SlashBlade.Art done = SlashBlade.art(fighter, blade, "random", target);
             if (done.executed()) {
-                lastArtTick = fighter.tickCount;
                 LOG.info("拔刀剑剑技:{} 释放了 {} (目标={})", fighter.getName().getString(), done.sa(), target.getId());
                 return true;
             }
+            // 放不出:断刀/封印/未附魔。这次先平A兜底,但记下来别再频繁重试。
             lastArtTick = fighter.tickCount;
+        } else {
+            // 冷却内:用拔刀剑自己的普通挥击(doSlash)保持攻势,而不是原版 player.attack 平A
+            // —— 原版平A 的 hurtEnemy 走的是 combo hitEffect,没有 combo 时几乎无伤害。
+            ItemStack main = fighter.getMainHandItem();
+            main.getCapability(ItemSlashBlade.BLADESTATE).ifPresent(state -> {
+                // 直接切到普通挥击的 combo A1,让拔刀剑自己放刀光
+                state.updateComboSeq(fighter, ComboStateRegistry.COMBO_A1.getId());
+                fighter.swing(InteractionHand.MAIN_HAND);
+            });
+            return true;
         }
 
-        // 平 A 兜底
+        // 真放不出(上面 art 失败后才会到这):平A兜底,保证打得出去
         fighter.attack(target);
         fighter.swing(InteractionHand.MAIN_HAND);
         return true;
-    }
-
-    /** 疾走居合冲锋(照车万女仆 {@code SlashBladeAttackUtils.rapidSlashAttack})——前冲贴近目标。 */
-    private boolean charge(NumenPlayer fighter, ItemStack blade) {
-        return blade.getCapability(mods.flammpfeil.slashblade.item.ItemSlashBlade.BLADESTATE)
-                .map(state -> {
-                    if (fighter.onGround()) {
-                        state.updateComboSeq(fighter, mods.flammpfeil.slashblade.registry.ComboStateRegistry.RAPID_SLASH.getId());
-                        fighter.swing(InteractionHand.MAIN_HAND);
-                        return true;
-                    }
-                    return false;
-                }).orElse(false);
     }
 }
