@@ -8,16 +8,16 @@ import net.minecraftforge.eventbus.api.IEventBus;
 import java.nio.file.Path;
 
 /**
- * 拔刀剑(SlashBlade:Resharped)联动:让同伴认出拔刀剑、读它的状态、用它的攻击管线挥刀、放剑技(SA/超SA)。
+ * 拔刀剑(SlashBlade:Resharped)联动:让同伴认出拔刀剑、读它的状态、用它的攻击管线挥刀、放剑技(SA/超SA/招式)。
  *
  * <p>它本质是一个独立联动模组,只是被内嵌进成品 jar 一起发。所以它<b>不是</b> {@code @Mod} 入口——装没装
  * 拔刀剑由 {@code Builtin} 那道闸判断,判断为真才调 {@link #install}。拔刀剑不在的话,这个类<b>一次
  * 都不会被加载</b>,而这一点是必须的:本联动直接编译依赖它的类({@code ItemSlashBlade}、
  * {@code AttackManager}、{@code SuperSlashArts}),类加载了就会去找那些类。
  *
- * <p>挂三样:<b>{@link SlashBladeMelee}</b>(主手是拔刀剑时,近战挥击接管成走拔刀剑自己的攻击管线,优先放
- * 完整剑技、平A兜底)、<b>{@link SlashBladeWeapon}</b>(让拔刀剑按真实伤害公式报近战评分,赢过铁剑)、
- * <b>{@link SlashBladeTicker}</b>(每服务端刻推进 combo 时间线,让多段招式完整播放)。
+ * <p>挂两样:<b>{@link SlashBladeMelee}</b>(主手是拔刀剑时,近战挥击接管成走拔刀剑自己的攻击管线,冷却到放
+ * 剑技、冷却中照旧平A)、<b>{@link SlashBladeWeapon}</b>(让拔刀剑按真实伤害公式报近战评分,赢过铁剑)。
+ * 剑技与招式全部直接生成刀光实体({@code AttackManager.doSlash}),不依赖 ComboState 状态机,所以无需逐刻驱动的 ticker。
  * 和史诗战斗({@code PlayerPatch} 那套)是两条完全不同的路,本联动不碰它。
  */
 public final class NumenSlashBlade {
@@ -35,8 +35,6 @@ public final class NumenSlashBlade {
         MeleeWeapons.register(new SlashBladeWeapon());
         NumenPlugins.register(NAMESPACE, numen -> {
             SlashBladeApi.install(numen);
-            // 每服务端刻推进 combo 时间线,让多段刀光/位移/收刀完整播完(假玩家没有被动 tick 链)
-            SlashBladeTicker.watch(numen);
             if (skillsRoot != null) {
                 numen.bundleSkills(skillsRoot);
             }
