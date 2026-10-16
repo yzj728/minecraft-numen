@@ -2,6 +2,7 @@ package com.dwinovo.numen.plugins.slashblade;
 
 import mods.flammpfeil.slashblade.capability.slashblade.ISlashBladeState;
 import mods.flammpfeil.slashblade.item.ItemSlashBlade;
+import mods.flammpfeil.slashblade.registry.ComboStateRegistry;
 import mods.flammpfeil.slashblade.slasharts.CircleSlash;
 import mods.flammpfeil.slashblade.slasharts.Drive;
 import mods.flammpfeil.slashblade.slasharts.JudgementCut;
@@ -25,27 +26,30 @@ import java.util.function.BiConsumer;
  *
  * <h2>为什么可以直接引用它的类</h2>
  * 拔刀剑开源且类名不混淆,所以直接编译依赖它,拿真正的 {@code ItemSlashBlade} / {@code AttackManager} /
- * {@code ISlashBladeState} 驱动同伴。运行时那份由玩家自己装上的模组提供({@code compileOnly}),
+ * {@code ISlashBladeState} / 各 SA 的 helper 驱动同伴。运行时那份由玩家自己装上的模组提供({@code compileOnly}),
  * 本插件不携带它一个字节。
  *
- * <h2>版本基准:1.1.23(1.20.1 线)</h2>
- * {@code gradle.properties} 的 {@code slashblade_version=1.1.23-1.20.1} 对着整合包实际在用的那一版编。这一代的
- * 剑技视觉<b>不是客户端动画,而是服务端生成实体</b>——判断斩是 {@code EntityJudgementCut}(它内部再吐
- * {@code EntitySlashEffect} 刀光),drive 系是 {@code EntityDrive},sakura/circle 是 {@code EntitySlashEffect}。
- * 这些实体都是 {@code Projectile} 子类、走 {@code NetworkHooks} 同步、在 {@code tick()} 里自己 {@code areaAttack}
- * 结算伤害。所以只要在服务端把实体生成出来,<b>特效和伤害就一起发生</b>,假玩家(ServerPlayer)与真玩家看到的
- * 完全一样,不依赖假玩家有没有客户端。
+ * <h2>版本基准:1.1.23(1.20.1 线,整合包实际在用)</h2>
+ * 这一代剑技的视觉是<b>服务端生成实体</b>(判断斩是 {@code EntityJudgementCut},drive 系是 {@code EntityDrive},
+ * sakura/circle 是 {@code EntitySlashEffect}),这些实体走 {@code NetworkHooks} 同步、在 {@code tick()} 里自己
+ * {@code areaAttack} 结算伤害。所以只要实体在服务端被正确生成,假玩家(ServerPlayer)与真玩家看到的一模一样。
  *
- * <h2>程序化搓招表(不让大模型想怎么搓)</h2>
- * 每个 SA 的"招式"就是调它对应的 helper 静态方法(照 {@code ComboStateRegistry} 里那些 tickAction 抄的原样
- * 参数)。这里把它收成一张 {@link #ARTS},key 是 SA 的短名({@code getSlashArtsKey().getPath()}),值是"放这一招
- * 该调什么"。模型只喊一个高层意图({@code slashblade.blade.art()}),服务端按表直调,不经过 combo 异步 tick,
- * 延迟和出错面都小。这样也<b>天然适配不同的拔刀剑</b>:刀上附什么 SA 就查表放什么招。
+ * <h2>放剑技的两步(缺一不可,这是车万女仆 native-power-of-maid 验证过的完整链路)</h2>
+ * <ol>
+ *   <li><b>推进 combo 状态</b>:{@link ISlashBladeState#doChargeAction}——真人松右键走的官方入口,它按 SA 与蓄力
+ *       时长把刀切到正确的 combo 段,这会顺带把刀的 color/rank 等状态就绪,也结算一次伤害。光有这一步,刀的
+ *       combo 状态是对的,但特效实体要等之后的 tick 由 {@code ItemSlashBlade.inventoryTick → cs.tickAction}
+ *       才生成——而假玩家没有那条被动 tick 链,所以光这样没特效。</li>
+ *   <li><b>补生成特效实体</b>:直接调各 SA 的 helper 静态方法(它们从刀的 state 读 color/rank、设 owner、
+ *       {@code addFreshEntity}),把原本该由 inventoryTick 异步生成的特效实体<b>同步生成</b>出来。这样既不走绕过
+ *       状态机(颜色/朝向对),又不依赖假玩家的被动 tick。</li>
+ * </ol>
+ * 上一版错误地被总结成"只调 helper、或只调 doChargeAction 二选一"——两个都调才对:doChargeAction 负责"状态正确",
+ * helper 负责"特效实体真的出来"。
  *
- * <h2>普通挥刀的出处:车万女仆的 {@code SlashBladeCompat}</h2>
- * 女仆适配拔刀剑只做两件事——认刀({@code stack.getItem() instanceof ItemSlashBlade})、挥刀
- * ({@code AttackManager.doSlash(...)}),是拔刀剑的服务器端公开口,对任意 {@link LivingEntity} 都可用,伤害由
- * 拔刀剑自己的攻击管线结算。同伴是假玩家,直接用这条口子,不经过任何技能容器或补丁。
+ * <h2>程序化搓招(不让大模型想怎么搓)</h2>
+ * 各 SA 的"招式"收成一张 {@link #ARTS}(key 是 SA 短名,值是"放这招该调哪个 helper"),模型只喊一个高层指令
+ * ({@code slashblade.blade.art()}),服务端照表直调。天然适配不同拔刀剑:刀上附什么 SA 就放什么招。
  */
 public final class SlashBlade {
 
@@ -61,12 +65,6 @@ public final class SlashBlade {
 
     /**
      * 挥一下拔刀剑——照女仆 {@code SlashBladeCompat.swingSlashBlade} 的口径。
-     *
-     * <p>{@code roll} 是这一刀的朝向偏移(度),女仆取 {@code random.nextInt(60) - 30}(±30°);
-     * 同伴要打中目标,由调用方先把身体转向目标再挥,这里滚角给 0,让刀刃沿身体朝向打出。
-     * {@code KnockBacks.smash} 与女仆一致:击退按拔刀剑的 smash 档结算。
-     *
-     * @return 这一刀是否真的挥了出去(拔刀剑状态允许时);拔刀剑不在手上时为 false
      */
     public static boolean swing(LivingEntity entity, ItemStack blade) {
         if (!isSlashBlade(blade)) {
@@ -78,7 +76,7 @@ public final class SlashBlade {
         return true;
     }
 
-    /** 这把刀断了没有(拔刀剑自己的耐久/断刀状态)。不是拔刀剑返回 false。 */
+    /** 这把刀断了没有。不是拔刀剑返回 false。 */
     public static boolean isBroken(ItemStack blade) {
         if (!isSlashBlade(blade)) {
             return false;
@@ -87,7 +85,7 @@ public final class SlashBlade {
                 .map(ISlashBladeState::isBroken).orElse(false);
     }
 
-    /** 这把刀附加的剑技(SA)的注册 key;拔刀剑一定会有一个(没有的话拔刀剑自己回退到判断斩)。 */
+    /** 这把刀附加的剑技(SA)的注册 key;没有则拔刀剑回退判断斩。 */
     public static String artKey(ItemStack blade) {
         if (!isSlashBlade(blade)) {
             return "";
@@ -111,13 +109,9 @@ public final class SlashBlade {
     }
 
     /**
-     * 每把拔刀剑的剑技(SA)短名 → 放这一招的动作。
-     *
-     * <p>这些是 {@code ComboStateRegistry} 里判断斩/樱花/sakura 等 SA 的 {@code tickAction}/{@code clickAction}
-     * 原样抄下来的"这一招该生成什么实体",参数与 1.1.23 源码头寸不差。关键:<b>只生成实体,不推进 combo</b>——
-     * 实体自己结算伤害、自己同步渲染,不需要 combo 状态机在异步 tick 里推。判断斩比较特殊,它有两档:
-     * {@code normal} 用多目标收刀({@code doJudgementCutSuper},"完整判断斩"),{@code just} 用单目标强化
-     * ({@code doJudgementCutJust});其余 SA 只有一档,{@code just} 与 {@code normal} 同招。
+     * 各 SA 短名 → 放招动作(照 {@code ComboStateRegistry} 里 tickAction/clickAction 抄的原样参数)。
+     * 判断斩 special:normal 用多目标收刀({@code doJudgementCutSuper}),just 用单目标强化
+     * ({@code doJudgementCutJust});其余 SA 只有一档。
      */
     private static final Map<String, BiConsumer<LivingEntity, Boolean>> ARTS = Map.of(
             "judgement_cut", (u, just) -> {
@@ -143,11 +137,10 @@ public final class SlashBlade {
             "wave_edge", (u, just) -> WaveEdge.doSlash(u, 90F, 20, Vec3.ZERO, false, 7, 0.2f, 1f, 4));
 
     /**
-     * 放一次剑技——查搓招表直调对应 helper,生成特效实体。
+     * 放一次剑技——两步:先 {@code doChargeAction} 推进 combo 状态(让刀 color/rank 就绪、结算伤害),
+     * 再调 helper 同步生成特效实体(原先由 inventoryTick 异步做的)。
      *
-     * <p>断刀/封印时拔刀剑自己的实体也不会生效,但这里先挡一道、给出明确的失败原因。特效实体的伤害与资源消耗
-     * (骄傲之魂等)由拔刀剑的实体 tick 结算——本插件不越俎代庖,也不双重结算({@code EntityJudgementCut} 等
-     * 已经在 {@code tick()} 里 {@code areaAttack})。挥一下手臂让动作看起来连贯。
+     * <p>插招前半段只推进状态、后半段只生成实体,叠加起来才等价于"真玩家放完整一招"。挥一下手臂让动作连贯。
      */
     private static Art doArt(LivingEntity entity, ISlashBladeState state, String type) {
         if (state.isBroken()) {
@@ -162,6 +155,10 @@ public final class SlashBlade {
             return new Art(false, artOf(state), "this blade's slash art is not supported");
         }
         boolean just = "just".equals(normalize(type));
+        // 第一步:推进 combo 状态(官方入口),让刀 state 就绪并结算一次伤害
+        int elapsed = just ? 10 : 20;
+        state.doChargeAction(entity, elapsed);
+        // 第二步:同步生成特效实体(补假玩家缺失的 inventoryTick 那一环)
         action.accept(entity, just);
         entity.swing(InteractionHand.MAIN_HAND);
         return new Art(true, artOf(state), "");
@@ -171,13 +168,13 @@ public final class SlashBlade {
         return type == null ? "normal" : type.toLowerCase(Locale.ROOT);
     }
 
-    /** 这把刀实际的剑技 key(完整注册名,如 {@code slashblade:judgement_cut})。 */
+    /** 这把刀实际的剑技 key(完整注册名)。 */
     private static String artOf(ISlashBladeState state) {
         ResourceLocation key = state.getSlashArtsKey();
         return key == null ? "slashblade:judgement_cut" : key.toString();
     }
 
-    /** SA 注册 key 的短名(去掉名字空间前缀),作搓招表的键;没有则回退判断斩。 */
+    /** SA 注册 key 短名,作搓招表键;没有回退判断斩。 */
     private static String shortName(ResourceLocation key) {
         if (key == null) {
             return "judgement_cut";
