@@ -1,6 +1,7 @@
 package com.dwinovo.numen.core.combat;
 
 import com.dwinovo.numen.api.combat.Firearms;
+import com.dwinovo.numen.api.combat.MeleeWeapons;
 import com.dwinovo.numen.api.combat.RangedFirearm;
 import com.dwinovo.numen.entity.NumenPlayer;
 
@@ -22,6 +23,10 @@ import net.minecraft.world.item.ItemStack;
  *
  * <p><b>枪械之间挑能开火的</b>({@link RangedFirearm#canFire}:弹匣有弹或带着匹配弹药):
  * 两把枪只有一把带着弹时挑那把,不挑到没弹的;所有枪都没弹才轮到别的远程。
+ *
+ * <p><b>近战按各武器自己的伤害公式排序</b>:原版武器读攻击属性({@link WeaponDamage#against}),
+ * 拔刀剑这类伤害走自己一套的经 {@link MeleeWeapons} 报分——它的面板攻击力只是公式一小项,
+ * 只按属性排会被铁剑比下去,而它真实更狠。
  */
 public final class Loadout {
 
@@ -62,7 +67,8 @@ public final class Loadout {
     }
 
     /**
-     * 扫一遍背包。近战按 {@link WeaponDamage#against} 对<b>这个目标</b>排序;远程按
+     * 扫一遍背包。近战按「该武器打这个目标的分值」排序——先问 {@link MeleeWeapons}(拔刀剑等模组武器),
+     * 没认领的退回 {@link WeaponDamage#against}(原版攻击属性);远程按
      * "能开火的枪 &gt; 上弦的弩 &gt; 弓 &gt; 未上弦的弩 &gt; 没弹的枪"挑。带着枪时近战为 null:
      * 战斗判据会走远程,拉开距离开枪。
      */
@@ -106,7 +112,10 @@ public final class Loadout {
                 }
                 continue;
             }
-            double score = WeaponDamage.against(player, target, stack);
+            double score = MeleeWeapons.score(player, stack, target);
+            if (score <= 0.0) {
+                score = WeaponDamage.against(player, target, stack);
+            }
             if (score > 0.0 && (bestMelee == null || score > bestMelee.score())) {
                 bestMelee = new Pick(slot, stack, score);
             }
