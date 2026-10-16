@@ -38,11 +38,11 @@ import java.util.Locale;
  * 但程序<b>不需要经过那条蓄力判定</b>:{@link SlashArts#doArts} 是按 {@code ArtsType}(Success/Jackpot/Super)
  * 直接返回目标 combo 的纯函数。所以这里直接按想要的档位取 combo、{@link ISlashBladeState#updateComboSeq}
  * 切过去,再由 ticker 逐 tick 播完整条时间线——<b>要普通有普通、要完美有完美、要超SA有超SA,零蓄力、零随机
- * 失手</b>。AI 只喊一个高层指令({@code art("normal"|"just"|"super"|"random")}),服务端照档取招。
+ * 失手</b>。AI 只喊一个高层指令,服务端照档取招。
  *
  * <h2>程序化搓招(不让大模型想怎么搓)</h2>
  * 剑技的全部动作、连段与特效由服务端预置。{@link #art} 放单招(指定档次或随机),{@link #combo} 放一整套
- * 连击(随机起手一条完整连段,由 ticker 逐 tick 推完)。模型不要自己编排挥刀序列——那样延迟大还容易乱。
+ * 连击(随机起手一条完整连段)。模型不要自己编排挥刀序列。
  */
 public final class SlashBlade {
 
@@ -112,7 +112,7 @@ public final class SlashBlade {
                 .orElseGet(List::of);
     }
 
-    /** 能不能放超SA:妖刀 + 锐利边缘 + 非断刀 + 非封印 + 满耐久。 */
+    /** 能不能放超SA:妖刀 + 锐利边缘 + 非断刀 + 非封印 + 满耐久 + 站地面。 */
     private static boolean canSuper(ItemStack blade, LivingEntity entity) {
         if (!isSlashBlade(blade)) {
             return false;
@@ -120,7 +120,7 @@ public final class SlashBlade {
         EnumSet<SwordType> types = SwordType.from(blade);
         boolean basic = types.contains(SwordType.BEWITCHED) && types.contains(SwordType.FIERCEREDGE)
                 && !types.contains(SwordType.SEALED);
-        if (!basic) {
+        if (!basic || !entity.onGround()) {
             return false;
         }
         return blade.getCapability(ItemSlashBlade.BLADESTATE)
@@ -133,25 +133,36 @@ public final class SlashBlade {
      *
      * <p><b>完全预制、绕开蓄力</b>:直接经 {@link SlashArts#doArts} 按档位拿 combo、{@code updateComboSeq} 切过去,
      * 之后多段由 {@link SlashBladeTicker} 逐 tick 播完。{@code random} 时服务端按刀状态随机挑一个能放的档次
-     * (能放超SA 就有一半概率放超SA,否则普通/完美各半)。要完美版({@code just})进来就是完美版,不必掐时机。
+     * (能放超SA 就有一半概率放超SA,否则普通/完美各半)。{@code super} 需要刀够格(妖刀+锐利+满耐久+地面),
+     * 不够格直接失败并给 reason,不静默降级。
      */
     public static Art art(LivingEntity entity, ItemStack blade, String type) {
         if (!isSlashBlade(blade)) {
             return new Art(false, "", "no slash blade in your main hand");
         }
+        String t = type == null ? "random" : type.toLowerCase(Locale.ROOT);
+        // super 单独走严格检查,不与 normal/just/random 混在降级逻辑里
+        if ("super".equals(t)) {
+            if (!canSuper(blade, entity)) {
+                return new Art(false, artKey(blade),
+                        "the blade needs to be bewitched (enchanted + named), fierce-edged (1000+ kills), "
+                                + "unbroken, unsealed, at full durability, and on the ground");
+            }
+            return blade.getCapability(ItemSlashBlade.BLADESTATE)
+                    .map(state -> doArt(entity, state, SlashArts.ArtsType.Super))
+                    .orElse(new Art(false, "", "the slash blade has no blade state"));
+        }
         return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
-            return doArt(entity, state, resolveType(entity, blade, type));
+            return doArt(entity, state, resolveType(entity, blade, t));
         }).orElse(new Art(false, "", "the slash blade has no blade state"));
     }
 
-    /** 把 {@code type} 规范成一个 {@link SlashArts.ArtsType};{@code random} 时按刀状态随机。 */
+    /** 把 {@code type}(不含 super)规范成一个 {@link SlashArts.ArtsType};{@code random} 时按刀状态随机。 */
     private static SlashArts.ArtsType resolveType(LivingEntity entity, ItemStack blade, String type) {
-        String t = type == null ? "random" : type.toLowerCase(Locale.ROOT);
         RandomSource random = entity.getRandom();
-        return switch (t) {
+        return switch (type) {
             case "normal" -> SlashArts.ArtsType.Success;
             case "just" -> SlashArts.ArtsType.Jackpot;
-            case "super" -> canSuper(blade, entity) ? SlashArts.ArtsType.Super : SlashArts.ArtsType.Success;
             case "random" -> {
                 // 能放超SA 就掷一枚硬币决定放不放,放不出超SA 时普通/完美各半
                 if (canSuper(blade, entity) && random.nextBoolean()) {
@@ -188,15 +199,8 @@ public final class SlashBlade {
         if (!isSlashBlade(blade)) {
             return new Action(false, "no slash blade in your main hand");
         }
-        if (!canSuper(blade, entity)) {
-            return new Action(false, "the blade needs to be bewitched (enchanted + named), fierce-edged "
-                    + "(1000+ kills), unbroken, unsealed, at full durability, and on the ground");
-        }
-        if (!(entity instanceof ServerPlayer player)) {
-            return new Action(false, "not a player entity");
-        }
-        SuperSlashArts.releaseSSA(player);
-        return new Action(true, "");
+        SlashBlade.Art done = art(entity, blade, "super");
+        return new Action(done.executed(), done.reason());
     }
 
     /**
@@ -209,7 +213,6 @@ public final class SlashBlade {
             return new Action(false, "no slash blade in your main hand");
         }
         RandomSource random = entity.getRandom();
-        // 起手连段(照 1.1.23 standby 输入表):地面普攻连段 A 或疾走居合,空中空中连段。
         ResourceLocation opener = entity.onGround()
                 ? (random.nextBoolean() ? ComboStateRegistry.COMBO_A1.getId() : ComboStateRegistry.RAPID_SLASH.getId())
                 : ComboStateRegistry.AERIAL_CLEAVE.getId();
