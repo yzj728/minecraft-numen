@@ -2,15 +2,22 @@ package com.dwinovo.numen.plugins.slashblade;
 
 import mods.flammpfeil.slashblade.capability.slashblade.ISlashBladeState;
 import mods.flammpfeil.slashblade.item.ItemSlashBlade;
-import mods.flammpfeil.slashblade.registry.ComboStateRegistry;
+import mods.flammpfeil.slashblade.slasharts.CircleSlash;
+import mods.flammpfeil.slashblade.slasharts.Drive;
+import mods.flammpfeil.slashblade.slasharts.JudgementCut;
+import mods.flammpfeil.slashblade.slasharts.SakuraEnd;
+import mods.flammpfeil.slashblade.slasharts.WaveEdge;
 import mods.flammpfeil.slashblade.util.AttackManager;
 import mods.flammpfeil.slashblade.util.KnockBacks;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.Locale;
+import java.util.Map;
+import java.util.function.BiConsumer;
 
 /**
  * 本插件对接拔刀剑(SlashBlade:Resharped)的那一面——<b>唯一</b>知道拔刀剑类型的地方,别处(API、技能、入口)
@@ -22,11 +29,18 @@ import java.util.Locale;
  * 本插件不携带它一个字节。
  *
  * <h2>版本基准:1.1.23(1.20.1 线)</h2>
- * {@code gradle.properties} 的 {@code slashblade_version=1.1.23-1.20.1} 对着整合包实际在用的那一版编。
- * 这一代(1.1.x)的剑技释放入口是 {@link ISlashBladeState#doChargeAction}:真人玩家松右键走的就是它
- * (见 {@code ItemSlashBlade.releaseUsing}),内部完整做了"蓄力判定 → {@code getSlashArts().doArts} → 优先级 →
- * {@code updateComboSeq}"这条链,<b>天然适配不同的拔刀剑</b>——刀上附什么 SA({@code getSlashArtsKey()})就放什么 SA。
- * 与 1.9.x 那套 {@code PerformSlashArtEvent} 不是一回事,别拿它来迁。
+ * {@code gradle.properties} 的 {@code slashblade_version=1.1.23-1.20.1} 对着整合包实际在用的那一版编。这一代的
+ * 剑技视觉<b>不是客户端动画,而是服务端生成实体</b>——判断斩是 {@code EntityJudgementCut}(它内部再吐
+ * {@code EntitySlashEffect} 刀光),drive 系是 {@code EntityDrive},sakura/circle 是 {@code EntitySlashEffect}。
+ * 这些实体都是 {@code Projectile} 子类、走 {@code NetworkHooks} 同步、在 {@code tick()} 里自己 {@code areaAttack}
+ * 结算伤害。所以只要在服务端把实体生成出来,<b>特效和伤害就一起发生</b>,假玩家(ServerPlayer)与真玩家看到的
+ * 完全一样,不依赖假玩家有没有客户端。
+ *
+ * <h2>程序化搓招表(不让大模型想怎么搓)</h2>
+ * 每个 SA 的"招式"就是调它对应的 helper 静态方法(照 {@code ComboStateRegistry} 里那些 tickAction 抄的原样
+ * 参数)。这里把它收成一张 {@link #ARTS},key 是 SA 的短名({@code getSlashArtsKey().getPath()}),值是"放这一招
+ * 该调什么"。模型只喊一个高层意图({@code slashblade.blade.art()}),服务端按表直调,不经过 combo 异步 tick,
+ * 延迟和出错面都小。这样也<b>天然适配不同的拔刀剑</b>:刀上附什么 SA 就查表放什么招。
  *
  * <h2>普通挥刀的出处:车万女仆的 {@code SlashBladeCompat}</h2>
  * 女仆适配拔刀剑只做两件事——认刀({@code stack.getItem() instanceof ItemSlashBlade})、挥刀
@@ -97,13 +111,43 @@ public final class SlashBlade {
     }
 
     /**
-     * 放一次剑技——照真人松右键的口径,直接走 {@link ISlashBladeState#doChargeAction}。
+     * 每把拔刀剑的剑技(SA)短名 → 放这一招的动作。
      *
-     * <p>{@code doChargeAction} 内部按 {@code elapsed} 判定这一下是普通(Success)还是居合时机(Jackpot):
-     * {@code SlashArts.ChargeTicks=9},默认 just 判定窗为 {@code [9,9+3)},所以
-     * {@code elapsed=20} 落在 Success、{@code elapsed=10} 落在 Jackpot。这与车万女仆「真正的力量」那类附属
-     * 用 20/10 同一个数。它还要检查当前连段是否允许(不可打断就返回 NONE),断了/封印了也返回 NONE——
-     * "这一下该不该放得出来"由拔刀剑自己说了算,本插件不越俎代庖。
+     * <p>这些是 {@code ComboStateRegistry} 里判断斩/樱花/sakura 等 SA 的 {@code tickAction}/{@code clickAction}
+     * 原样抄下来的"这一招该生成什么实体",参数与 1.1.23 源码头寸不差。关键:<b>只生成实体,不推进 combo</b>——
+     * 实体自己结算伤害、自己同步渲染,不需要 combo 状态机在异步 tick 里推。判断斩比较特殊,它有两档:
+     * {@code normal} 用多目标收刀({@code doJudgementCutSuper},"完整判断斩"),{@code just} 用单目标强化
+     * ({@code doJudgementCutJust});其余 SA 只有一档,{@code just} 与 {@code normal} 同招。
+     */
+    private static final Map<String, BiConsumer<LivingEntity, Boolean>> ARTS = Map.of(
+            "judgement_cut", (u, just) -> {
+                if (just) {
+                    JudgementCut.doJudgementCutJust(u);
+                } else {
+                    JudgementCut.doJudgementCutSuper(u);
+                }
+            },
+            "sakura_end", (u, just) -> {
+                SakuraEnd.doSlash(u, 22.5F, Vec3.ZERO, false, false, 1.2);
+                SakuraEnd.doSlash(u, 180F - 22.5F, Vec3.ZERO, false, true, 1.5);
+            },
+            "void_slash", (u, just) -> AttackManager.doVoidSlashAttack(u),
+            "circle_slash", (u, just) -> {
+                CircleSlash.doCircleSlashAttack(u, 180);
+                CircleSlash.doCircleSlashAttack(u, 90);
+                CircleSlash.doCircleSlashAttack(u, 0);
+                CircleSlash.doCircleSlashAttack(u, -90);
+            },
+            "drive_vertical", (u, just) -> Drive.doSlash(u, -90F, 10, Vec3.ZERO, false, 7, 2f),
+            "drive_horizontal", (u, just) -> Drive.doSlash(u, 0F, 10, Vec3.ZERO, false, 7, 2f),
+            "wave_edge", (u, just) -> WaveEdge.doSlash(u, 90F, 20, Vec3.ZERO, false, 7, 0.2f, 1f, 4));
+
+    /**
+     * 放一次剑技——查搓招表直调对应 helper,生成特效实体。
+     *
+     * <p>断刀/封印时拔刀剑自己的实体也不会生效,但这里先挡一道、给出明确的失败原因。特效实体的伤害与资源消耗
+     * (骄傲之魂等)由拔刀剑的实体 tick 结算——本插件不越俎代庖,也不双重结算({@code EntityJudgementCut} 等
+     * 已经在 {@code tick()} 里 {@code areaAttack})。挥一下手臂让动作看起来连贯。
      */
     private static Art doArt(LivingEntity entity, ISlashBladeState state, String type) {
         if (state.isBroken()) {
@@ -112,21 +156,32 @@ public final class SlashBlade {
         if (state.isSealed()) {
             return new Art(false, artOf(state), "the blade is sealed");
         }
-        int elapsed = "just".equals(normalize(type)) ? 10 : 20;
-        ResourceLocation combo = state.doChargeAction(entity, elapsed);
-        if (combo == null || combo.equals(ComboStateRegistry.NONE.getId())) {
-            return new Art(false, artOf(state), "no slash art effect right now (not ready or mid-combo)");
+        String key = shortName(state.getSlashArtsKey());
+        BiConsumer<LivingEntity, Boolean> action = ARTS.get(key);
+        if (action == null) {
+            return new Art(false, key, "this blade's slash art (" + key + ") is not supported");
         }
-        return new Art(true, artOf(state), "");
+        boolean just = "just".equals(normalize(type));
+        action.accept(entity, just);
+        entity.swing(InteractionHand.MAIN_HAND);
+        return new Art(true, key, "");
     }
 
     private static String normalize(String type) {
         return type == null ? "normal" : type.toLowerCase(Locale.ROOT);
     }
 
-    /** 这把刀实际的剑技 key(与 {@link #artKey} 同源,手上已有 {@code state},少查一遍 capability)。 */
+    /** 这把刀实际的剑技 key(完整注册名,如 {@code slashblade:judgement_cut})。 */
     private static String artOf(ISlashBladeState state) {
         ResourceLocation key = state.getSlashArtsKey();
         return key == null ? "slashblade:judgement_cut" : key.toString();
+    }
+
+    /** SA 注册 key 的短名(去掉名字空间前缀),作搓招表的键;没有则回退判断斩。 */
+    private static String shortName(ResourceLocation key) {
+        if (key == null) {
+            return "judgement_cut";
+        }
+        return key.getPath();
     }
 }
