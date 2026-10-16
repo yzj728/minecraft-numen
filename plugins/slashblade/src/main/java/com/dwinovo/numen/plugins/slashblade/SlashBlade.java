@@ -11,6 +11,7 @@ import mods.flammpfeil.slashblade.util.AttackManager;
 import mods.flammpfeil.slashblade.util.KnockBacks;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.util.RandomSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
@@ -32,16 +33,16 @@ import java.util.Locale;
  * {@code cs.tickAction(living)} 逐 tick 驱动;假玩家没有这条被动链,由 {@link SlashBladeTicker} 在服务端
  * 每 tick 复现同一条链(见该类)。
  *
- * <h2>为什么不再用 helper 简版刀光</h2>
- * 上一版错误地只调 {@code ISlashBladeState#doChargeAction}(推进状态)加各 SA 的 helper 静态方法
- * ({@code JudgementCut.doJudgementCutSuper} 等)补特效。但那些 helper 只是"放一片一次性刀光"的简版,
- * <b>不是</b> {@code ComboState.tickAction} 那套多段时间线——判断斩真正的"收刀冲刺 + 连续刀光 + 收刀音效
- * + 命中眩晕"整段都放不出来,只剩一道刀光。正确做法是让刀切到目标 combo,再由 ticker 逐 tick 驱动它自己
- * 的时间线,忠实复现真人。
+ * <h2>预制招式:绕开蓄力,按「档」取招</h2>
+ * 真人放 SA 要长按右键、按蓄力时长判「普通/完美/失败」,完美窗口只有 3~4 tick,连玩家都常打不出来。
+ * 但程序<b>不需要经过那条蓄力判定</b>:{@link SlashArts#doArts} 是按 {@code ArtsType}(Success/Jackpot/Super)
+ * 直接返回目标 combo 的纯函数。所以这里直接按想要的档位取 combo、{@link ISlashBladeState#updateComboSeq}
+ * 切过去,再由 ticker 逐 tick 播完整条时间线——<b>要普通有普通、要完美有完美、要超SA有超SA,零蓄力、零随机
+ * 失手</b>。AI 只喊一个高层指令({@code art("normal"|"just"|"super"|"random")}),服务端照档取招。
  *
  * <h2>程序化搓招(不让大模型想怎么搓)</h2>
- * 模型只喊一个高层指令({@code slashblade.blade.art()}),服务端读当前刀的 SA、经 {@link SlashArts#doArts}
- * 得到目标 combo 并切过去,后续全套由 ticker 驱动。天然适配不同的刀:附什么 SA 就放什么招。
+ * 剑技的全部动作、连段与特效由服务端预置。{@link #art} 放单招(指定档次或随机),{@link #combo} 放一整套
+ * 连击(随机起手连段 + 随机 SA 收尾)。模型不要自己编排挥刀序列——那样延迟大还容易乱。
  */
 public final class SlashBlade {
 
@@ -50,7 +51,7 @@ public final class SlashBlade {
     /** 一次剑技(SA)的返回。 */
     public record Art(boolean executed, String sa, String reason) {}
 
-    /** 一次挥刀或放剑技的动作返回。 */
+    /** 一次挥刀、放剑技或一套连招的动作返回。 */
     public record Action(boolean executed, String reason) {}
 
     /** 一件物品是不是拔刀剑。 */
@@ -111,24 +112,59 @@ public final class SlashBlade {
                 .orElseGet(List::of);
     }
 
+    /** 能不能放超SA:妖刀 + 锐利边缘 + 非断刀 + 非封印 + 满耐久 + 站地面。 */
+    private static boolean canSuper(ItemStack blade, LivingEntity entity) {
+        if (!isSlashBlade(blade)) {
+            return false;
+        }
+        EnumSet<SwordType> types = SwordType.from(blade);
+        boolean basic = types.contains(SwordType.BEWITCHED) && types.contains(SwordType.FIERCEREDGE)
+                && !types.contains(SwordType.SEALED);
+        if (!basic) {
+            return false;
+        }
+        return blade.getCapability(ItemSlashBlade.BLADESTATE)
+                .map(state -> !state.isBroken() && state.getDamage() == 0)
+                .orElse(false);
+    }
+
     /**
-     * 放一次剑技(SA)。{@code type} 是 {@code normal} / {@code just} 之一。
+     * 放一次剑技(SA)。{@code type} 是 {@code normal} / {@code just} / {@code super} / {@code random} 之一。
      *
-     * <p>走拔刀剑自己的 {@link SlashArts#doArts} 得到目标 combo,再 {@link ISlashBladeState#updateComboSeq}
-     * 切过去。切换即触发该段的 {@code clickAction}(进场动作),之后的多段刀光 / 位移 / 收刀由
-     * {@link SlashBladeTicker} 逐 tick 驱动 {@code tickAction},忠实现真人。
+     * <p><b>完全预制、绕开蓄力</b>:直接经 {@link SlashArts#doArts} 按档位拿 combo、{@code updateComboSeq} 切过去,
+     * 之后多段由 {@link SlashBladeTicker} 逐 tick 播完。{@code random} 时服务端按刀状态随机挑一个能放的档次
+     * (能放超SA 就有一半概率放超SA,否则普通/完美随机)。要完美版({@code just})进来就是完美版,不必掐时机。
      */
     public static Art art(LivingEntity entity, ItemStack blade, String type) {
         if (!isSlashBlade(blade)) {
             return new Art(false, "", "no slash blade in your main hand");
         }
         return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
-            return doArt(entity, state, type);
+            return doArt(entity, state, resolveType(entity, blade, type));
         }).orElse(new Art(false, "", "the slash blade has no blade state"));
     }
 
-    /** 放一次剑技——先判断刀/封印,再按 {@code normal}/{@code just} 放对应 combo。 */
-    private static Art doArt(LivingEntity entity, ISlashBladeState state, String type) {
+    /** 把 {@code type} 规范成一个 {@link SlashArts.ArtsType};{@code random} 时按刀状态随机。 */
+    private static SlashArts.ArtsType resolveType(LivingEntity entity, ItemStack blade, String type) {
+        String t = type == null ? "random" : type.toLowerCase(Locale.ROOT);
+        RandomSource random = entity.getRandom();
+        return switch (t) {
+            case "normal" -> SlashArts.ArtsType.Success;
+            case "just" -> SlashArts.ArtsType.Jackpot;
+            case "super" -> canSuper(blade, entity) ? SlashArts.ArtsType.Super : SlashArts.ArtsType.Success;
+            case "random" -> {
+                // 能放超SA 就掷一枚硬币决定放不放,放不出超SA 时普通/完美各半
+                if (canSuper(blade, entity) && random.nextBoolean()) {
+                    yield SlashArts.ArtsType.Super;
+                }
+                yield random.nextBoolean() ? SlashArts.ArtsType.Success : SlashArts.ArtsType.Jackpot;
+            }
+            default -> SlashArts.ArtsType.Success;
+        };
+    }
+
+    /** 放一次剑技——先判断刀/封印/是否附魔,再按已定档位切 combo。 */
+    private static Art doArt(LivingEntity entity, ISlashBladeState state, SlashArts.ArtsType artsType) {
         if (state.isBroken()) {
             return new Art(false, artOf(state), "the blade is broken; repair it first");
         }
@@ -138,8 +174,6 @@ public final class SlashBlade {
         if (!SwordType.from(entity.getMainHandItem()).contains(SwordType.ENCHANTED)) {
             return new Art(false, artOf(state), "this blade is not enchanted; it has no slash art yet");
         }
-        boolean just = "just".equals(normalize(type));
-        SlashArts.ArtsType artsType = just ? SlashArts.ArtsType.Jackpot : SlashArts.ArtsType.Success;
         ResourceLocation combo = state.getSlashArts().doArts(artsType, entity);
         if (combo == null || combo.equals(ComboStateRegistry.NONE.getId())) {
             return new Art(false, artOf(state), "this blade's slash art is not supported");
@@ -149,38 +183,41 @@ public final class SlashBlade {
         return new Art(true, artOf(state), "");
     }
 
-    /**
-     * 放一次超SA(Super Slash Art)。1.1.23 的超SA 由 {@link SuperSlashArts#releaseSSA} 放,它内部自己判
-     * 断刀/封印/妖刀+锐利/是否在地面,条件不满足就直接不动作(无返回)。这里先读一遍条件,模型好拿到明确的
-     * {@code reason},再放。
-     *
-     * <p>超SA 的释放要求(和 {@code SuperSlashArts.releaseSSA} 一致):非断刀、非封印、刀同时是妖刀
-     * ({@link SwordType#BEWITCHED}=附魔+自定义名或默认妖刀)与锐利边缘({@link SwordType#FIERCEREDGE}=杀敌
-     * &ge;1000),且站在地面。
-     */
+    /** 放一次超SA的别名——等价于 {@code art(..., "super")},保留显式口子。 */
     public static Action superArt(LivingEntity entity, ItemStack blade) {
         if (!isSlashBlade(blade)) {
             return new Action(false, "no slash blade in your main hand");
         }
+        if (!canSuper(blade, entity)) {
+            return new Action(false, "the blade needs to be bewitched (enchanted + named), fierce-edged "
+                    + "(1000+ kills), unbroken, unsealed, at full durability, and you on the ground");
+        }
         if (!(entity instanceof ServerPlayer player)) {
             return new Action(false, "not a player entity");
         }
-        EnumSet<SwordType> types = SwordType.from(blade);
-        if (blade.getCapability(ItemSlashBlade.BLADESTATE).map(ISlashBladeState::isBroken).orElse(false)) {
-            return new Action(false, "the blade is broken; repair it first");
-        }
-        if (blade.getCapability(ItemSlashBlade.BLADESTATE).map(ISlashBladeState::isSealed).orElse(false)) {
-            return new Action(false, "the blade is sealed");
-        }
-        if (!types.contains(SwordType.BEWITCHED) || !types.contains(SwordType.FIERCEREDGE)) {
-            return new Action(false, "the blade needs to be bewitched (enchanted + named) and fierce-edged "
-                    + "(1000+ kills) to release its super slash art");
-        }
-        if (!entity.onGround()) {
-            return new Action(false, "release it while on the ground");
-        }
         SuperSlashArts.releaseSSA(player);
         return new Action(true, "");
+    }
+
+    /**
+     * 放一整套连击(预制),由服务端随机选套路:先随机进一个普攻连段起手,再由 ticker 逐 tick 推完整条连段,
+     * 到收招时随机接一个 SA 收尾。模型只喊 {@code slashblade.blade.combo()},不用自己想套路。
+     */
+    public static Action combo(LivingEntity entity, ItemStack blade) {
+        if (!isSlashBlade(blade)) {
+            return new Action(false, "no slash blade in your main hand");
+        }
+        RandomSource random = entity.getRandom();
+        // 起手连段(1.1.23 的 standby 输入表映射):地面用普攻连段 A 或疾走居合,空中用空中连段。
+        ResourceLocation opener = entity.onGround()
+                ? (random.nextBoolean() ? ComboStateRegistry.COMBO_A1.getId() : ComboStateRegistry.RAPID_SLASH.getId())
+                : ComboStateRegistry.AERIAL_CLEAVE.getId();
+        return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
+            state.updateComboSeq(entity, opener);
+            entity.swing(InteractionHand.MAIN_HAND);
+            // 收尾 SA 由 ticker 推进连段到终点后随机接;这里只记一个"已起手",真正收尾见 SlashBladeTicker
+            return new Action(true, "");
+        }).orElse(new Action(false, "the slash blade has no blade state"));
     }
 
     /**
@@ -205,10 +242,6 @@ public final class SlashBlade {
                 state.setComboSeq(state.getComboRoot());
             }
         });
-    }
-
-    private static String normalize(String type) {
-        return type == null ? "normal" : type.toLowerCase(Locale.ROOT);
     }
 
     /** 这把刀实际的剑技 key(完整注册名)。 */
