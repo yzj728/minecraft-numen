@@ -1,47 +1,39 @@
 package com.dwinovo.numen.plugins.slashblade;
 
-import mods.flammpfeil.slashblade.ability.SuperSlashArts;
 import mods.flammpfeil.slashblade.capability.slashblade.ISlashBladeState;
-import mods.flammpfeil.slashblade.event.SlashBladeEvent;
 import mods.flammpfeil.slashblade.item.ItemSlashBlade;
 import mods.flammpfeil.slashblade.item.SwordType;
-import mods.flammpfeil.slashblade.registry.ComboStateRegistry;
-import mods.flammpfeil.slashblade.registry.combo.ComboState;
-import mods.flammpfeil.slashblade.slasharts.SlashArts;
 import mods.flammpfeil.slashblade.util.AttackManager;
 import mods.flammpfeil.slashblade.util.KnockBacks;
 import net.minecraft.commands.arguments.EntityAnchorArgument;
 import net.minecraft.resources.ResourceLocation;
-import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
-import net.minecraftforge.common.MinecraftForge;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
-import java.util.Objects;
 
 /**
- * 本插件对接拔刀剑(SlashBlade:Resharped)的那一面——<b>唯一</b>知道拔刀剑类型的地方,别处(API、技能、入口)
- * 都不碰它的类。
+ * 本插件对接拔刀剑(SlashBlade:Resharped)的那一面——<b>唯一</b>知道拔刀剑类型的地方。
  *
- * <h2>核心:直接释放招式,不搓连段</h2>
- * 拔刀剑每一招就是一个 {@link ComboState} 状态机:进场调 {@code clickAction}(第一击)、持续期每 tick 调
- * {@code tickAction}(多段刀光/位移/收刀/眩晕)、到点按 {@code nextOfTimeout} 自动衔接下一段。所谓「放一招」就是
- * {@code updateComboSeq(entity, 那一招的 combo key)} 切过去——进场即放第一击,后续由 {@link SlashBladeTicker}
- * 逐 tick 播完。所以「直接释放」= 直接指定招式名 → 切到对应 combo,<b>完全绕开玩家的蓄力判定和 {@code doArts}
- * 的档位抽象</b>。这里 {@link #release} 就干这一件事。
+ * <h2>核心:直接生成拔刀剑的刀光特效实体,不碰 ComboState 状态机</h2>
+ * 平A 之所以有刀光+伤害,是因为走 {@link AttackManager#doSlash}:它生成一个 {@code EntitySlashEffect} 实体
+ * ({@code new EntitySlashEffect(...) + setOwner + setDamage + addFreshEntity}),实体自己 tick 结算伤害。
+ * 之前试过「切到 {@code ComboState}、由 ticker 逐刻推 {@code tickAction}」那条路,在假玩家(ServerPlayer)身上
+ * 放不出多段招式——假玩家没有女仆(NPC)那种独立的 AI goal 去持续推进连段状态机。所以这里<b>彻底绕开
+ * ComboState</b>,所有招式都用「直接 {@code doSlash}」——和平A 同一条、已验证可用的实体生成链路。
  *
- * <h2>放 SA 的正确链路(照车万女仆「真正的力量」{@code SlashBladeAttackUtils.doSlashArts})</h2>
- * 放剑技有一步<b>必须</b>:post {@link SlashBladeEvent.PerformSlashArtEvent}(拔刀剑释放剑技的事件钩子,别的模组
- * 和它自己都靠它)。跳过它,最后的收尾段就出不来。{@link #doArt} 走这一步;{@link #release} 走「直接切 combo」的路(用于非 SA 招式)。
+ * <h2>各招式的实现:不同 roll 角度 / comboRatio / 位移组合</h2>
+ * 拔刀剑的「招式」视觉本质就是一连串 {@code EntitySlashEffect} 刀光。这里按招式名编排几刀
+ * {@code doSlash}(不同 roll 角度扭出多段刀光)+ 给身体一个位移,模拟疾走居合的前冲、跳跃攻击的升空。
+ * 伤害由每一刀各自结算,和平A 完全一致。SA 的独特多目标特效(判断斩/樱花等)这里用多段刀光逼近,
+ * 不依赖那些可能因版本差异签不对的 helper 类。
  */
 public final class SlashBlade {
 
@@ -58,9 +50,7 @@ public final class SlashBlade {
         return !stack.isEmpty() && stack.getItem() instanceof ItemSlashBlade;
     }
 
-    /**
-     * 挥一下拔刀剑——照女仆 {@code SlashBladeCompat.swingSlashBlade} 的口径,普通挥击。
-     */
+    /** 挥一下拔刀剑(普通挥击)——就是平A 那一下,已验证有刀光+伤害。 */
     public static boolean swing(LivingEntity entity, ItemStack blade) {
         if (!isSlashBlade(blade)) {
             return false;
@@ -80,7 +70,7 @@ public final class SlashBlade {
                 .map(ISlashBladeState::isBroken).orElse(false);
     }
 
-    /** 这把刀附加的剑技(SA)的注册 key;没有则拔刀剑回退判断斩。 */
+    /** 这把刀附加的剑技(SA)的注册 key;没有则回退判断斩。 */
     public static String artKey(ItemStack blade) {
         if (!isSlashBlade(blade)) {
             return "";
@@ -93,7 +83,7 @@ public final class SlashBlade {
                 .orElse("");
     }
 
-    /** 这把刀附的特殊效果(SE)的注册 key 列表;不是拔刀剑返回空表。SE 是被动效果,不是主动放的招。 */
+    /** 这把刀附的特殊效果(SE)的注册 key 列表。SE 是被动,不是主动放的招。 */
     public static List<String> specialEffects(ItemStack blade) {
         if (!isSlashBlade(blade)) {
             return List.of();
@@ -111,182 +101,147 @@ public final class SlashBlade {
                 .orElseGet(List::of);
     }
 
-    /** 能不能放超SA:妖刀 + 锐利边缘 + 非断刀 + 非封印 + 满耐久 + 站地面。 */
-    private static boolean canSuper(ItemStack blade, LivingEntity entity) {
-        if (!isSlashBlade(blade)) {
-            return false;
-        }
-        EnumSet<SwordType> types = SwordType.from(blade);
-        boolean basic = types.contains(SwordType.BEWITCHED) && types.contains(SwordType.FIERCEREDGE)
-                && !types.contains(SwordType.SEALED);
-        if (!basic || !entity.onGround()) {
-            return false;
-        }
-        return blade.getCapability(ItemSlashBlade.BLADESTATE)
-                .map(state -> !state.isBroken() && state.getDamage() == 0)
-                .orElse(false);
-    }
-
-    /** 放一次超SA——照官方 {@link SuperSlashArts#releaseSSA},满耐久才放、放时耗一半耐久。 */
-    private static Art superArtImpl(LivingEntity entity, ItemStack blade) {
-        if (!(entity instanceof ServerPlayer player)) {
-            return new Art(false, artKey(blade), "not a player entity");
-        }
-        if (!canSuper(blade, entity)) {
-            return new Art(false, artKey(blade),
-                    "the blade needs to be bewitched (enchanted + named), fierce-edged (1000+ kills), "
-                            + "unbroken, unsealed, at full durability, and on the ground");
-        }
-        SuperSlashArts.releaseSSA(player);
-        return new Art(true, artKey(blade), "");
-    }
-
     /**
-     * 放一次剑技(SA)。{@code type} 是 {@code normal} / {@code just} / {@code super} / {@code random} 之一。
-     * 不带目标:只放,不替你面向(调用方负责先转身)。
+     * 放一次剑技(SA)。{@code type} = {@code normal}/{@code just}/{@code super}/{@code random}。
+     * <p>直接生成多段刀光(不同 roll 角度),伤害由每段各自结算。{@code just} 加暴击、{@code super} 加暴击
+     * 和更大力度。带目标时先面向它。
      */
     public static Art art(LivingEntity entity, ItemStack blade, String type) {
         return art(entity, blade, type, null);
     }
 
-    /**
-     * 放一次剑技,带目标——放之前 {@code lookAt(FEET, target)} 面向它。{@code target} 为 null 时不面向。
-     */
     public static Art art(LivingEntity entity, ItemStack blade, String type, Entity target) {
         if (!isSlashBlade(blade)) {
             return new Art(false, "", "no slash blade in your main hand");
+        }
+        if (blade.getCapability(ItemSlashBlade.BLADESTATE).map(ISlashBladeState::isBroken).orElse(false)) {
+            return new Art(false, artKey(blade), "the blade is broken; repair it first");
+        }
+        if (blade.getCapability(ItemSlashBlade.BLADESTATE).map(ISlashBladeState::isSealed).orElse(false)) {
+            return new Art(false, artKey(blade), "the blade is sealed");
         }
         if (target != null) {
             entity.lookAt(EntityAnchorArgument.Anchor.FEET, target.position());
         }
         String t = type == null ? "random" : type.toLowerCase(Locale.ROOT);
-        if ("random".equals(t)) {
-            if (canSuper(blade, entity) && entity.getRandom().nextBoolean()) {
-                return superArtImpl(entity, blade);
+        boolean just = false;
+        boolean powerful = false;
+        switch (t) {
+            case "just" -> just = true;
+            case "super" -> powerful = true;
+            case "random" -> {
+                if (entity.getRandom().nextBoolean()) just = true;
             }
-            SlashArts.ArtsType half = entity.getRandom().nextBoolean()
-                    ? SlashArts.ArtsType.Success : SlashArts.ArtsType.Jackpot;
-            return blade.getCapability(ItemSlashBlade.BLADESTATE)
-                    .map(state -> doArt(entity, state, half))
-                    .orElse(new Art(false, "", "the slash blade has no blade state"));
+            default -> { /* normal */ }
         }
-        if ("super".equals(t)) {
-            return superArtImpl(entity, blade);
-        }
-        SlashArts.ArtsType artsType = switch (t) {
-            case "just" -> SlashArts.ArtsType.Jackpot;
-            default -> SlashArts.ArtsType.Success;
-        };
-        return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
-            return doArt(entity, state, artsType);
-        }).orElse(new Art(false, "", "the slash blade has no blade state"));
+        releaseArt(entity, just, powerful);
+        return new Art(true, artKey(blade), "");
     }
 
-    /** 放一次普通/完美剑技——照车万女仆 doSlashArts:post PerformSlashArtEvent,取改写的 combo 再切。 */
-    private static Art doArt(LivingEntity entity, ISlashBladeState state, SlashArts.ArtsType artsType) {
-        if (state.isBroken()) {
-            return new Art(false, artOf(state), "the blade is broken; repair it first");
+    /** 放一次 SA 的实体效果:多段刀光(判断斩式的连续斩杀)。 */
+    private static void releaseArt(LivingEntity entity, boolean just, boolean powerful) {
+        RandomSource random = entity.getRandom();
+        double ratio = powerful ? 1.2 : just ? 0.88 : 1.0;
+        int count = powerful ? 5 : just ? 4 : 3;
+        for (int i = 0; i < count; i++) {
+            float roll = -60 + (i * 40) + (random.nextFloat() * 20 - 10);
+            // 每一段都是一道独立刀光,伤害由 EntitySlashEffect 自己结算
+            AttackManager.doSlash(entity, roll, Vec3.ZERO, false, just || powerful, ratio, KnockBacks.smash);
         }
-        if (state.isSealed()) {
-            return new Art(false, artOf(state), "the blade is sealed");
-        }
-        if (!SwordType.from(entity.getMainHandItem()).contains(SwordType.ENCHANTED)) {
-            return new Art(false, artOf(state), "this blade is not enchanted; it has no slash art yet");
-        }
-        int elapsed = artsType == SlashArts.ArtsType.Jackpot ? 10 : 20;
-        ResourceLocation comboLoc = state.getSlashArts().doArts(artsType, entity);
-        SlashBladeEvent.PerformSlashArtEvent event =
-                new SlashBladeEvent.PerformSlashArtEvent(entity, elapsed, state, comboLoc, artsType);
-        MinecraftForge.EVENT_BUS.post(event);
-        if (event.isCanceled()) {
-            return new Art(false, artOf(state), "the slash art was cancelled");
-        }
-        comboLoc = event.getComboState();
-        ComboState combo = ComboStateRegistry.REGISTRY.get().getValue(comboLoc);
-        if (combo == null || Objects.equals(comboLoc, ComboStateRegistry.NONE.getId())) {
-            return new Art(false, artOf(state), "this blade's slash art is not supported");
-        }
-        state.updateComboSeq(entity, comboLoc);
         entity.swing(InteractionHand.MAIN_HAND);
-        return new Art(true, artOf(state), "");
     }
 
-    /** 放一次超SA的别名——等价于 {@code art(..., "super")}。 */
+    /** 放一次超SA 的别名(暴击高力度多段)。 */
     public static Action superArt(LivingEntity entity, ItemStack blade) {
-        SlashBlade.Art done = art(entity, blade, "super");
-        return new Action(done.executed(), done.reason());
+        if (!isSlashBlade(blade)) {
+            return new Action(false, "no slash blade in your main hand");
+        }
+        releaseArt(entity, true, true);
+        return new Action(true, "");
     }
-
-    /** 招式名 → combo key 的映射(1.1.23 ComboStateRegistry 里确认的键)。 */
-    private static final Map<String, ResourceLocation> MOVES = Map.of(
-            "rapid_slash", ComboStateRegistry.RAPID_SLASH.getId(),      // 疾走居合:前冲+连续刀光
-            "upperslash", ComboStateRegistry.UPPERSLASH.getId(),        // 挑空
-            "upperslash_jump", ComboStateRegistry.UPPERSLASH_JUMP.getId(), // 跃升斩:升空+下劈
-            "aerial_cleave", ComboStateRegistry.AERIAL_CLEAVE.getId(),  // 空中下劈
-            "rising_star", ComboStateRegistry.RISING_STAR.getId()       // 晨星:上挑连击
-    );
 
     /**
-     * <b>直接释放一个招式,完全跳过搓招/蓄力</b>。{@code move} 是招式名:
-     * {@code rapid_slash}(疾走居合)、{@code upperslash}(挑空)、{@code upperslash_jump}(跃升斩)、
-     * {@code aerial_cleave}(空中下劈)、{@code rising_star}(晨星)。直接 {@code updateComboSeq} 切到对应 combo,
-     * 进场即放第一击,后续多段由 {@link SlashBladeTicker} 逐 tick 播完。
+     * 直接释放一个具体招式,完全跳过搓招/ComboState。
+     * {@code move} = {@code rapid_slash}(疾走居合)、{@code upperslash}(挑空)、{@code upperslash_jump}(跃升斩)、
+     * {@code aerial_cleave}(空中下劈)、{@code rising_star}(晨星)。
      */
     public static Action release(LivingEntity entity, ItemStack blade, String move) {
         if (!isSlashBlade(blade)) {
             return new Action(false, "no slash blade in your main hand");
         }
-        ResourceLocation combo = MOVES.get(move == null ? "" : move.toLowerCase(Locale.ROOT));
-        if (combo == null) {
-            return new Action(false, "unknown move: " + move
-                    + " (known: rapid_slash, upperslash, upperslash_jump, aerial_cleave, rising_star)");
+        String m = move == null ? "" : move.toLowerCase(Locale.ROOT);
+        switch (m) {
+            case "rapid_slash" -> releaseRapidSlash(entity);
+            case "upperslash" -> releaseUpperSlash(entity, false);
+            case "upperslash_jump" -> releaseUpperSlash(entity, true);
+            case "aerial_cleave" -> releaseAerialCleave(entity);
+            case "rising_star" -> releaseRisingStar(entity);
+            default -> {
+                return new Action(false, "unknown move: " + move
+                        + " (known: rapid_slash, upperslash, upperslash_jump, aerial_cleave, rising_star)");
+            }
         }
-        return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
-            state.updateComboSeq(entity, combo);
-            entity.swing(InteractionHand.MAIN_HAND);
-            return new Action(true, "");
-        }).orElse(new Action(false, "the slash blade has no blade state"));
+        entity.swing(InteractionHand.MAIN_HAND);
+        return new Action(true, "");
     }
 
-    /**
-     * 放一整套连击(预制),由服务端随机选起手:地面随机进「普攻连段 A」或「疾走居合」,空中进「空中连段」。
-     */
+    /** 疾走居合:前冲 + 连续多段刀光。 */
+    private static void releaseRapidSlash(LivingEntity entity) {
+        // 前冲位移(朝她面朝方向)
+        Vec3 look = entity.getLookAngle();
+        entity.setDeltaMovement(look.x * 0.8, entity.getDeltaMovement().y, look.z * 0.8);
+        randSlashes(entity, 5, 0.7);
+    }
+
+    /** 挑空 / 跃升斩:挑空(或升空)+ 上挥刀光。 */
+    private static void releaseUpperSlash(LivingEntity entity, boolean jump) {
+        if (jump) {
+            entity.setDeltaMovement(0, 0.6, 0);
+            entity.setOnGround(false);
+            entity.hasImpulse = true;
+        }
+        AttackManager.doSlash(entity, -80, Vec3.ZERO, false, false, 0.5, KnockBacks.toss);
+        if (jump) {
+            AttackManager.doSlash(entity, -57, Vec3.ZERO, false, false, 0.6, KnockBacks.toss);
+        }
+    }
+
+    /** 空中下劈:向下的重击刀光(正面落点)。 */
+    private static void releaseAerialCleave(LivingEntity entity) {
+        AttackManager.doSlash(entity, 55, Vec3.ZERO, true, true, 0.44, KnockBacks.meteor);
+    }
+
+    /** 晨星:上挑连击(多段上行刀光)。 */
+    private static void releaseRisingStar(LivingEntity entity) {
+        entity.setDeltaMovement(0, 0.6, 0);
+        entity.setOnGround(false);
+        entity.hasImpulse = true;
+        AttackManager.doSlash(entity, -57, Vec3.ZERO, false, false, 0.6, KnockBacks.toss);
+        randSlashes(entity, 3, 0.5);
+    }
+
+    /** 随机角度的几段刀光。 */
+    private static void randSlashes(LivingEntity entity, int count, double ratio) {
+        RandomSource random = entity.getRandom();
+        for (int i = 0; i < count; i++) {
+            float roll = -90 + 180 * random.nextFloat();
+            AttackManager.doSlash(entity, roll, AttackManager.genRushOffset(entity), false, i % 2 == 0, ratio,
+                    KnockBacks.smash);
+        }
+    }
+
+    /** 放一整套连击(预制):随机起手,但都落地成「多段刀光」,不依赖 ComboState。 */
     public static Action combo(LivingEntity entity, ItemStack blade) {
         if (!isSlashBlade(blade)) {
             return new Action(false, "no slash blade in your main hand");
         }
-        RandomSource random = entity.getRandom();
-        ResourceLocation opener = entity.onGround()
-                ? (random.nextBoolean() ? ComboStateRegistry.COMBO_A1.getId() : ComboStateRegistry.RAPID_SLASH.getId())
-                : ComboStateRegistry.AERIAL_CLEAVE.getId();
-        return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
-            state.updateComboSeq(entity, opener);
-            entity.swing(InteractionHand.MAIN_HAND);
-            return new Action(true, "");
-        }).orElse(new Action(false, "the slash blade has no blade state"));
-    }
-
-    /**
-     * 逐 tick 推进刀当前的 combo 时间线——复现 {@code ItemSlashBlade.inventoryTick} 里
-     * {@code cs.tickAction(living)} 那一段。假玩家没有被动 tick 链,由 {@link SlashBladeTicker} 每服务端刻调用这里。
-     */
-    public static void tickAction(LivingEntity entity) {
-        ItemStack blade = entity.getMainHandItem();
-        if (!isSlashBlade(blade)) {
-            return;
+        if (entity.onGround()) {
+            randSlashes(entity, 4, 0.55);
+        } else {
+            releaseAerialCleave(entity);
         }
-        blade.getCapability(ItemSlashBlade.BLADESTATE).ifPresent(state -> {
-            ResourceLocation loc = state.resolvCurrentComboState(entity);
-            ComboState cs = ComboStateRegistry.REGISTRY.get().getValue(loc);
-            if (cs == null) {
-                cs = ComboStateRegistry.NONE.get();
-            }
-            if (cs != null) {
-                cs.tickAction(entity);
-            } else if (!loc.equals(state.getComboRoot())) {
-                state.setComboSeq(state.getComboRoot());
-            }
-        });
+        entity.swing(InteractionHand.MAIN_HAND);
+        return new Action(true, "");
     }
 
     /** 这把刀实际的剑技 key(完整注册名)。 */
