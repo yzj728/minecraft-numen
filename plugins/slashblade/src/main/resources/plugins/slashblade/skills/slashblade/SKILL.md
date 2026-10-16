@@ -33,13 +33,12 @@ slashblade.blade.all()     -- 背包里每一把拔刀剑,带格子号、断刀�
 ```lua
 slashblade.blade.art()            -- 普通释放(默认)
 slashblade.blade.art("just")      -- 居合/连击时机判定出的强化版
-slashblade.blade.art("super")     -- 超必杀(如果这把刀有)
 ```
 
 - **先 `slashblade.blade.held()` 看 `sa`** 知道这把刀是什么剑技,再决定放不放、放哪一档。
 - **先面向目标**再放(它不替你瞄准,朝你面朝方向出招);先 `numen.move` 走到合适距离开外。
 - 返回 `{executed, sa, reason}`:**executed=false 时读 reason 照着做**,别盲目重试。常见原因:断刀(broken)、
-  封印(sealed)、消耗的骄傲之魂不够、或被别的模组拦下。
+  封印(sealed)、不在能放剑技的连段时机里(上一段没收完)、或消耗的骄傲之魂不够。
 - 剑技要耗资源、有节奏,别无脑连放;普通打怪用 `numen.fight.attack` 的自动挥刀即可,<b>在想要范围更大、
   伤害更高、或特定效果时才放剑技</b>。
 
