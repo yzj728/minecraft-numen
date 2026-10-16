@@ -42,7 +42,7 @@ import java.util.Locale;
  *
  * <h2>程序化搓招(不让大模型想怎么搓)</h2>
  * 剑技的全部动作、连段与特效由服务端预置。{@link #art} 放单招(指定档次或随机),{@link #combo} 放一整套
- * 连击(随机起手连段 + 随机 SA 收尾)。模型不要自己编排挥刀序列——那样延迟大还容易乱。
+ * 连击(随机起手一条完整连段,由 ticker 逐 tick 推完)。模型不要自己编排挥刀序列——那样延迟大还容易乱。
  */
 public final class SlashBlade {
 
@@ -112,7 +112,7 @@ public final class SlashBlade {
                 .orElseGet(List::of);
     }
 
-    /** 能不能放超SA:妖刀 + 锐利边缘 + 非断刀 + 非封印 + 满耐久 + 站地面。 */
+    /** 能不能放超SA:妖刀 + 锐利边缘 + 非断刀 + 非封印 + 满耐久。 */
     private static boolean canSuper(ItemStack blade, LivingEntity entity) {
         if (!isSlashBlade(blade)) {
             return false;
@@ -133,7 +133,7 @@ public final class SlashBlade {
      *
      * <p><b>完全预制、绕开蓄力</b>:直接经 {@link SlashArts#doArts} 按档位拿 combo、{@code updateComboSeq} 切过去,
      * 之后多段由 {@link SlashBladeTicker} 逐 tick 播完。{@code random} 时服务端按刀状态随机挑一个能放的档次
-     * (能放超SA 就有一半概率放超SA,否则普通/完美随机)。要完美版({@code just})进来就是完美版,不必掐时机。
+     * (能放超SA 就有一半概率放超SA,否则普通/完美各半)。要完美版({@code just})进来就是完美版,不必掐时机。
      */
     public static Art art(LivingEntity entity, ItemStack blade, String type) {
         if (!isSlashBlade(blade)) {
@@ -190,7 +190,7 @@ public final class SlashBlade {
         }
         if (!canSuper(blade, entity)) {
             return new Action(false, "the blade needs to be bewitched (enchanted + named), fierce-edged "
-                    + "(1000+ kills), unbroken, unsealed, at full durability, and you on the ground");
+                    + "(1000+ kills), unbroken, unsealed, at full durability, and on the ground");
         }
         if (!(entity instanceof ServerPlayer player)) {
             return new Action(false, "not a player entity");
@@ -200,22 +200,22 @@ public final class SlashBlade {
     }
 
     /**
-     * 放一整套连击(预制),由服务端随机选套路:先随机进一个普攻连段起手,再由 ticker 逐 tick 推完整条连段,
-     * 到收招时随机接一个 SA 收尾。模型只喊 {@code slashblade.blade.combo()},不用自己想套路。
+     * 放一整套连击(预制),由服务端随机选起手:地面随机进「普攻连段 A」或「疾走居合」,空中进「空中连段」。
+     * 起手后整条连段树由 {@link SlashBladeTicker} 逐 tick 自动推进、自动衔接、自动收刀——模型只喊
+     * {@code slashblade.blade.combo()},不用想套路。
      */
     public static Action combo(LivingEntity entity, ItemStack blade) {
         if (!isSlashBlade(blade)) {
             return new Action(false, "no slash blade in your main hand");
         }
         RandomSource random = entity.getRandom();
-        // 起手连段(1.1.23 的 standby 输入表映射):地面用普攻连段 A 或疾走居合,空中用空中连段。
+        // 起手连段(照 1.1.23 standby 输入表):地面普攻连段 A 或疾走居合,空中空中连段。
         ResourceLocation opener = entity.onGround()
                 ? (random.nextBoolean() ? ComboStateRegistry.COMBO_A1.getId() : ComboStateRegistry.RAPID_SLASH.getId())
                 : ComboStateRegistry.AERIAL_CLEAVE.getId();
         return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
             state.updateComboSeq(entity, opener);
             entity.swing(InteractionHand.MAIN_HAND);
-            // 收尾 SA 由 ticker 推进连段到终点后随机接;这里只记一个"已起手",真正收尾见 SlashBladeTicker
             return new Action(true, "");
         }).orElse(new Action(false, "the slash blade has no blade state"));
     }
