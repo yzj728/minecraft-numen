@@ -126,17 +126,19 @@ public final class NumenPlayer extends ServerPlayer implements Body {
      * 挥臂。假玩家没有客户端,原版"客户端发 {@code ServerboundSwingPacket} → 服务端广播"的挥臂链路
      * 断在第一步(没有客户端发),而 {@code ChunkMapCompanionMixin} 又把她从 viewer 名单剔除,服务端也不会
      * 自动把挥臂动画包广播给附近真玩家。于是在这里补上:照常跑父类(设置服务端 swinging 状态),再手动把
-     * 主手挥臂动画包广播给<b>正在追踪这具身体</b>的真玩家——他们客户端收到 {@code SWING_MAIN_HAND} 就会
-     * 给假玩家播挥臂动画。这样拔刀剑等一切主手近战攻击都能被主人看到挥剑动作,而不只是刀光。
+     * 主手挥臂动画包经 {@code ServerChunkCache.broadcast} 广播给<b>正在追踪这具身体</b>的真玩家——他们客户端
+     * 收到 {@code SWING_MAIN_HAND} 就会给假玩家播挥臂动画。这样拔刀剑等一切主手近战攻击都能被主人看到挥剑动作,
+     * 而不只是刀光。
      *
-     * <p>{@code broadcastToTrackingPlayers} 走的是实体 tracker 的反向广播(谁在追踪这个实体),与
+     * <p>{@code broadcast} 走的是实体 tracker 的反向广播(谁在追踪这个实体),与
      * {@code skipPlayer} 那条"假玩家作为 viewer 去收别人的包"是两个独立通道,互不影响,所以安全。
      */
     @Override
     public void swing(InteractionHand hand) {
         super.swing(hand);
-        if (!level().isClientSide()) {
-            broadcastToTrackingPlayers(new ClientboundAnimatePacket(this, ClientboundAnimatePacket.SWING_MAIN_HAND));
+        if (level() instanceof ServerLevel serverLevel) {
+            serverLevel.getChunkSource().broadcast(
+                    this, new ClientboundAnimatePacket(this, ClientboundAnimatePacket.SWING_MAIN_HAND));
         }
     }
 
