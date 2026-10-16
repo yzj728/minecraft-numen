@@ -155,28 +155,28 @@ public final class SlashBlade {
             return new Art(false, "", "no slash blade in your main hand");
         }
         String t = type == null ? "random" : type.toLowerCase(Locale.ROOT);
+        // random 要在「放超SA」上走 releaseSSA,不能把 Super 混进 doArts 的普通/完美里(那会绕开耐久消耗)
+        if ("random".equals(t)) {
+            if (canSuper(blade, entity) && entity.getRandom().nextBoolean()) {
+                return superArtImpl(entity, blade);
+            }
+            // 放不出超SA 时普通/完美各半
+            SlashArts.ArtsType half = entity.getRandom().nextBoolean()
+                    ? SlashArts.ArtsType.Success : SlashArts.ArtsType.Jackpot;
+            return blade.getCapability(ItemSlashBlade.BLADESTATE)
+                    .map(state -> doArt(entity, state, half))
+                    .orElse(new Art(false, "", "the slash blade has no blade state"));
+        }
         if ("super".equals(t)) {
             return superArtImpl(entity, blade);
         }
-        return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
-            return doArt(entity, state, resolveType(entity, blade, t));
-        }).orElse(new Art(false, "", "the slash blade has no blade state"));
-    }
-
-    /** 把 {@code type}(不含 super)规范成一个 {@link SlashArts.ArtsType};{@code random} 时按刀状态随机。 */
-    private static SlashArts.ArtsType resolveType(LivingEntity entity, ItemStack blade, String type) {
-        RandomSource random = entity.getRandom();
-        return switch (type) {
-            case "normal" -> SlashArts.ArtsType.Success;
+        SlashArts.ArtsType artsType = switch (t) {
             case "just" -> SlashArts.ArtsType.Jackpot;
-            case "random" -> {
-                if (canSuper(blade, entity) && random.nextBoolean()) {
-                    yield SlashArts.ArtsType.Super;
-                }
-                yield random.nextBoolean() ? SlashArts.ArtsType.Success : SlashArts.ArtsType.Jackpot;
-            }
             default -> SlashArts.ArtsType.Success;
         };
+        return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
+            return doArt(entity, state, artsType);
+        }).orElse(new Art(false, "", "the slash blade has no blade state"));
     }
 
     /**
