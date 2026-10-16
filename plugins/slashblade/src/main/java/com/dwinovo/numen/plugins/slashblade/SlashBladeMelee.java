@@ -12,17 +12,14 @@ import org.slf4j.LoggerFactory;
 /**
  * 主手是拔刀剑时接管近战挥击,做两件事:
  * <ol>
- *   <li><b>优先搓招</b>:先尝试放一次剑技(SA),放出来就是完整一招(动作+特效+伤害);</li>
- *   <li><b>平 A 兜底</b>:放不出(断刀/封印/不支持/冷却中)就退回 numen 自己那套原版平 A
- *       ({@code player.attack + player.swing}),保证她永远打得出去、动作特效不丢。</li>
+ *   <li><b>优先搓招</b>:先尝试放一次剑技(完整一招,由 {@link SlashBladeTicker} 逐 tick 驱动多段);</li>
+ *   <li><b>平A兜底</b>:放不出(断刀/封印/未附魔/冷却中)就退回 numen 自己那套原版平 A
+ *       ({@code player.attack + player.swing}),保证她永远打得出去。</li>
  * </ol>
  *
- * <p>之前版本在这里直接调 {@code AttackManager.doSlash},反而把 numen 本来的平 A 链(
- * {@code Player.attack → ItemSlashBlade.hurtEnemy → combo hitEffect})替换成了更简陋的一刀,导致平 A 动作特效
- * 都没了。现在不再替换:平 A 照旧走原版,只在冷却窗口到了、能放出剑技时,用剑技这一招顶替那一下平 A。
- *
- * <p><b>冷却</b>:剑技耗骄傲之魂等资源,不能每一下平 A 都换成剑技。放一次剑技后进 {@link #ART_COOLDOWN_TICKS}
- * 冷却,期间照旧平 A。冷却用身体的 {@code tickCount},不占任务槽、也不依赖额外计时器。
+ * <p>选刀不在这里:近战首选哪把由 {@code Loadout} 决定,{@link SlashBladeWeapon} 让拔刀剑按真实伤害报分、赢过
+ * 铁剑,身体会自动把它切到主手——这里只管"主手是拔刀剑时怎么打"。所以不存在"包里有拔刀剑却去拿铁剑"的
+ * 问题了,那一步在评分那头已经解决。
  */
 final class SlashBladeMelee implements MeleeStyle {
 
@@ -30,7 +27,7 @@ final class SlashBladeMelee implements MeleeStyle {
 
     /**
      * 两次剑技之间的最小间隔(tick)。20 tick = 1 秒;40 tick = 2 秒。
-     * 太短会疯狂刷判断斩、耗光骄傲之魂;太长则“优先搓招”名存实亡。
+     * 太短会疯狂刷判断斩、耗光骄傲之魂;太长则"优先搓招"名存实亡。
      */
     private static final int ART_COOLDOWN_TICKS = 40;
 
@@ -52,7 +49,7 @@ final class SlashBladeMelee implements MeleeStyle {
         InputDriver.lookAt(fighter, target.getEyePosition());
         fighter.setSprinting(false);
 
-        // 优先搓招:冷却到了、且刀状态允许就放一次剑技(完整一招)
+        // 优先搓招:冷却到了就放一次完整剑技(超SA / 普通 SA),之后的多段由 SlashBladeTicker 逐 tick 播完
         if (fighter.tickCount - lastArtTick >= ART_COOLDOWN_TICKS) {
             SlashBlade.Art done = SlashBlade.art(fighter, blade, "normal");
             if (done.executed()) {
@@ -60,7 +57,7 @@ final class SlashBladeMelee implements MeleeStyle {
                 LOG.info("拔刀剑剑技:{} 释放了 {} (目标={})", fighter.getName().getString(), done.sa(), target.getId());
                 return true;
             }
-            // 放不出(断刀/封印/不支持)也记一次冷却,避免每 tick 都徒劳重试
+            // 放不出(断刀/封印/未附魔/不支持)也记一次冷却,避免每 tick 都徒劳重试
             lastArtTick = fighter.tickCount;
         }
 
