@@ -16,7 +16,9 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -89,6 +91,24 @@ public final class SlashBlade {
                     return key == null ? "slashblade:judgement_cut" : key.toString();
                 })
                 .orElse("");
+    }
+
+    /** 这把刀附的特殊效果(SE)的注册 key 列表;不是拔刀剑返回空表。SE 是被动效果,不是主动放的招。 */
+    public static List<String> specialEffects(ItemStack blade) {
+        if (!isSlashBlade(blade)) {
+            return List.of();
+        }
+        return blade.getCapability(ItemSlashBlade.BLADESTATE)
+                .map(state -> {
+                    List<String> out = new ArrayList<>();
+                    for (ResourceLocation se : state.getSpecialEffects()) {
+                        if (se != null) {
+                            out.add(se.toString());
+                        }
+                    }
+                    return out;
+                })
+                .orElseGet(List::of);
     }
 
     /**
