@@ -36,9 +36,9 @@ import java.util.Locale;
  * <h2>预制招式:绕开蓄力,按「档」取招</h2>
  * 真人放 SA 要长按右键、按蓄力时长判「普通/完美/失败」,完美窗口只有 3~4 tick,连玩家都常打不出来。
  * 但程序<b>不需要经过那条蓄力判定</b>:{@link SlashArts#doArts} 是按 {@code ArtsType}(Success/Jackpot/Super)
- * 直接返回目标 combo 的纯函数。所以这里直接按想要的档位取 combo、{@link ISlashBladeState#updateComboSeq}
- * 切过去,再由 ticker 逐 tick 播完整条时间线——<b>要普通有普通、要完美有完美、要超SA有超SA,零蓄力、零随机
- * 失手</b>。AI 只喊一个高层指令,服务端照档取招。
+ * 直接返回目标 combo 的纯函数。普通/完美直接按档取 combo、{@link ISlashBladeState#updateComboSeq} 切过去,
+ * 再由 ticker 逐 tick 播完整条时间线;超SA 走 {@link SuperSlashArts#releaseSSA}(它内部也是 doArts(Super),
+ * 额外耗一半耐久 + 有优先级防打断)。<b>要普通有普通、要完美有完美、要超SA有超SA,零蓄力、零随机失手</b>。
  *
  * <h2>程序化搓招(不让大模型想怎么搓)</h2>
  * 剑技的全部动作、连段与特效由服务端预置。{@link #art} 放单招(指定档次或随机),{@link #combo} 放一整套
@@ -128,29 +128,35 @@ public final class SlashBlade {
                 .orElse(false);
     }
 
+    /** 放一次超SA——照官方 {@link SuperSlashArts#releaseSSA},满耐久才放、放时耗一半耐久。 */
+    private static Art superArtImpl(LivingEntity entity, ItemStack blade) {
+        if (!(entity instanceof ServerPlayer player)) {
+            return new Art(false, artKey(blade), "not a player entity");
+        }
+        if (!canSuper(blade, entity)) {
+            return new Art(false, artKey(blade),
+                    "the blade needs to be bewitched (enchanted + named), fierce-edged (1000+ kills), "
+                            + "unbroken, unsealed, at full durability, and on the ground");
+        }
+        SuperSlashArts.releaseSSA(player);
+        return new Art(true, artKey(blade), "");
+    }
+
     /**
      * 放一次剑技(SA)。{@code type} 是 {@code normal} / {@code just} / {@code super} / {@code random} 之一。
      *
-     * <p><b>完全预制、绕开蓄力</b>:直接经 {@link SlashArts#doArts} 按档位拿 combo、{@code updateComboSeq} 切过去,
-     * 之后多段由 {@link SlashBladeTicker} 逐 tick 播完。{@code random} 时服务端按刀状态随机挑一个能放的档次
-     * (能放超SA 就有一半概率放超SA,否则普通/完美各半)。{@code super} 需要刀够格(妖刀+锐利+满耐久+地面),
-     * 不够格直接失败并给 reason,不静默降级。
+     * <p><b>完全预制、绕开蓄力</b>:普通/完美直接经 {@link SlashArts#doArts} 按档位拿 combo、切过去,多段由
+     * {@link SlashBladeTicker} 逐 tick 播完;超SA 走官方 {@link SuperSlashArts#releaseSSA}。{@code random} 时
+     * 服务端按刀状态随机挑一个能放的档次(能超SA 就一半概率超SA,否则普通/完美各半)。{@code super} 不够格
+     * 直接失败给 reason,不静默降级。
      */
     public static Art art(LivingEntity entity, ItemStack blade, String type) {
         if (!isSlashBlade(blade)) {
             return new Art(false, "", "no slash blade in your main hand");
         }
         String t = type == null ? "random" : type.toLowerCase(Locale.ROOT);
-        // super 单独走严格检查,不与 normal/just/random 混在降级逻辑里
         if ("super".equals(t)) {
-            if (!canSuper(blade, entity)) {
-                return new Art(false, artKey(blade),
-                        "the blade needs to be bewitched (enchanted + named), fierce-edged (1000+ kills), "
-                                + "unbroken, unsealed, at full durability, and on the ground");
-            }
-            return blade.getCapability(ItemSlashBlade.BLADESTATE)
-                    .map(state -> doArt(entity, state, SlashArts.ArtsType.Super))
-                    .orElse(new Art(false, "", "the slash blade has no blade state"));
+            return superArtImpl(entity, blade);
         }
         return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
             return doArt(entity, state, resolveType(entity, blade, t));
@@ -164,7 +170,6 @@ public final class SlashBlade {
             case "normal" -> SlashArts.ArtsType.Success;
             case "just" -> SlashArts.ArtsType.Jackpot;
             case "random" -> {
-                // 能放超SA 就掷一枚硬币决定放不放,放不出超SA 时普通/完美各半
                 if (canSuper(blade, entity) && random.nextBoolean()) {
                     yield SlashArts.ArtsType.Super;
                 }
@@ -174,7 +179,10 @@ public final class SlashBlade {
         };
     }
 
-    /** 放一次剑技——先判断刀/封印/是否附魔,再按已定档位切 combo。 */
+    /**
+     * 放一次普通/完美剑技——先判断刀/封印/是否附魔,再按已定档位切 combo。
+     * 注意:超SA 不走这里(它要耗一半耐久),见 {@link #superArtImpl}。
+     */
     private static Art doArt(LivingEntity entity, ISlashBladeState state, SlashArts.ArtsType artsType) {
         if (state.isBroken()) {
             return new Art(false, artOf(state), "the blade is broken; repair it first");
@@ -194,11 +202,8 @@ public final class SlashBlade {
         return new Art(true, artOf(state), "");
     }
 
-    /** 放一次超SA的别名——等价于 {@code art(..., "super")},保留显式口子。 */
+    /** 放一次超SA的别名——等价于 {@code art(..., "super")}。 */
     public static Action superArt(LivingEntity entity, ItemStack blade) {
-        if (!isSlashBlade(blade)) {
-            return new Action(false, "no slash blade in your main hand");
-        }
         SlashBlade.Art done = art(entity, blade, "super");
         return new Action(done.executed(), done.reason());
     }
