@@ -22,17 +22,19 @@ import java.util.Locale;
  * {@code slashblade.blade}:拔刀剑——认出拔刀剑、读它的状态与剑技、主动挥刀、放剑技(SA)。
  *
  * <p>全在服务端。认刀、读状态是只读;挥刀走拔刀剑自己的 {@code AttackManager.doSlash},放剑技走
- * {@code getSlashArts().doArts} + {@code PerformSlashArtEvent} + {@code updateComboSeq},伤害与资源消耗
- * (骄傲之魂等)都由拔刀剑自己的管线结算。伤人那一下由 {@code numen.fight.attack} 那条战斗路照常把关
- * (近战接管在 {@code AttackCompanionTask.tickWeapon} 里,权限层已经放行才轮到挥刀);{@code art} 是只影响
- * 同伴自己动作的技能释放,不直接指定打谁(它朝面朝的方向放),伤害落到谁由拔刀剑结算。
+ * {@code ISlashBladeState.doChargeAction},伤害与资源消耗(骄傲之魂等)都由拔刀剑自己的管线结算。伤人那一下
+ * 由 {@code numen.fight.attack} 那条战斗路照常把关(近战接管在 {@code AttackCompanionTask.tickWeapon} 里,
+ * 权限层已经放行才轮到挥刀);{@code art} 是只影响同伴自己动作的技能释放,不直接指定打谁(它朝面朝方向放),
+ * 伤害落到谁由拔刀剑结算。
  *
  * <p><b>什么时候用哪条路</b>:点名打谁、自卫,照旧 {@code numen.fight.attack} / {@code numen.fight.clear}
  * ——主手是拔刀剑时普通挥击自动走拔刀剑管线,不用额外做任何事;{@code slashblade.blade.art} 是主动放剑技
  * (SA)的动作级口子,一次一个剑技,在想要比普通挥刀更狠、范围更大、或特定效果时用。
  *
  * <p><b>适配不同的拔刀剑</b>:剑技(SA)是每把刀自己的属性——{@code held().sa} / {@code all()[].sa} 告诉你
- * 这把刀附的是什么剑技,{@code art(type)} 读的是当前主手那把刀的 SA,所以不管换哪把刀都放对。
+ * 这把刀附的是什么剑技,{@code art(...)} 读的是当前主手那把刀的 SA,所以不管换哪把刀都放对。
+ *
+ * <p><b>版本</b>:编译对着拔刀剑 1.1.23(整合包实际在用),剑技释放经 {@code doChargeAction},适配 1.1.x 线。
  *
  * <p><b>和史诗战斗的区别</b>:拔刀剑是它自己的模组(攻击管线、断刀、剑技都归它),史诗战斗是另一套动作系统。
  * 两套互不相干;拿拔刀剑打时不需要切史诗战斗模式,拿史诗战斗武器时也不需要碰这里。
@@ -61,8 +63,8 @@ public final class SlashBladeApi {
                       String reason) {}
 
     /** 放哪一个档的剑技。 */
-    public record ArtSpec(@Doc("\"normal\" for the usual release, \"just\" for the just-timed release, "
-            + "\"super\" for the super release. Defaults to \"normal\".")
+    public record ArtSpec(@Doc("\"normal\" for the usual release, \"just\" for the just-timed release. "
+            + "Defaults to \"normal\".")
                           String type) {}
 
     /** 背包里一把拔刀剑。 */
@@ -129,11 +131,9 @@ public final class SlashBladeApi {
     @Fn("Release the slash art (SA) of the slash blade in your main hand, through SlashBlade's own pipeline.")
     @Example("slashblade.blade.art()")
     @Example("slashblade.blade.art(\"just\")")
-    @Example("slashblade.blade.art(\"super\")")
     @Note("It releases the slash art attached to the blade you hold (see held().sa), so it adapts to whichever "
             + "blade you carry.")
-    @Note("\"normal\" is the usual release, \"just\" the just-timed release (fewer charge ticks, Jackpot timing), "
-            + "\"super\" the super release. Leave type out for \"normal\".")
+    @Note("\"normal\" is the usual release, \"just\" the just-timed release. Leave type out for \"normal\".")
     @Note("It does not aim for you: face the target first, and it costs proud souls / needs the blade in order — "
             + "when it fails, read the reason.")
     @SeeAlso({"slashblade.blade.held", "slashblade.blade.swing", "numen.fight.attack"})
@@ -144,9 +144,9 @@ public final class SlashBladeApi {
             return new Art(false, "", "no slash blade in your main hand");
         }
         String type = args == null || args.type() == null ? "normal" : args.type().toLowerCase(Locale.ROOT);
-        if (!type.equals("normal") && !type.equals("just") && !type.equals("super")) {
+        if (!type.equals("normal") && !type.equals("just")) {
             throw new ApiError(ErrorKind.BAD_ARGUMENT,
-                    "type must be \"normal\", \"just\" or \"super\"", null);
+                    "type must be \"normal\" or \"just\"", null);
         }
         SlashBlade.Art done = SlashBlade.art(her, blade, type);
         return new Art(done.executed(), done.sa(), done.reason());
