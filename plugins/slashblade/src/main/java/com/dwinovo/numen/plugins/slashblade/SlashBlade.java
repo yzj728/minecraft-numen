@@ -2,6 +2,7 @@ package com.dwinovo.numen.plugins.slashblade;
 
 import mods.flammpfeil.slashblade.ability.SuperSlashArts;
 import mods.flammpfeil.slashblade.capability.slashblade.ISlashBladeState;
+import mods.flammpfeil.slashblade.event.SlashBladeEvent;
 import mods.flammpfeil.slashblade.item.ItemSlashBlade;
 import mods.flammpfeil.slashblade.item.SwordType;
 import mods.flammpfeil.slashblade.registry.ComboStateRegistry;
@@ -9,18 +10,22 @@ import mods.flammpfeil.slashblade.registry.combo.ComboState;
 import mods.flammpfeil.slashblade.slasharts.SlashArts;
 import mods.flammpfeil.slashblade.util.AttackManager;
 import mods.flammpfeil.slashblade.util.KnockBacks;
+import net.minecraft.commands.arguments.EntityAnchorArgument;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
+import net.minecraftforge.common.MinecraftForge;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 
 /**
  * 本插件对接拔刀剑(SlashBlade:Resharped)的那一面——<b>唯一</b>知道拔刀剑类型的地方,别处(API、技能、入口)
@@ -33,16 +38,21 @@ import java.util.Locale;
  * {@code cs.tickAction(living)} 逐 tick 驱动;假玩家没有这条被动链,由 {@link SlashBladeTicker} 在服务端
  * 每 tick 复现同一条链(见该类)。
  *
- * <h2>预制招式:绕开蓄力,按「档」取招</h2>
- * 真人放 SA 要长按右键、按蓄力时长判「普通/完美/失败」,完美窗口只有 3~4 tick,连玩家都常打不出来。
- * 但程序<b>不需要经过那条蓄力判定</b>:{@link SlashArts#doArts} 是按 {@code ArtsType}(Success/Jackpot/Super)
- * 直接返回目标 combo 的纯函数。普通/完美直接按档取 combo、{@link ISlashBladeState#updateComboSeq} 切过去,
- * 再由 ticker 逐 tick 播完整条时间线;超SA 走 {@link SuperSlashArts#releaseSSA}(它内部也是 doArts(Super),
- * 额外耗一半耐久 + 有优先级防打断)。<b>要普通有普通、要完美有完美、要超SA有超SA,零蓄力、零随机失手</b>。
+ * <h2>放剑技的正确链路(照车万女仆「真正的力量」的 {@code SlashBladeAttackUtils.doSlashArts})</h2>
+ * 放一次剑技不是「doArts 拿 combo、updateComboSeq 切过去」三行就完事——中间有一环<b>必须</b>:
+ * <ol>
+ *   <li>{@code lookAt(FEET, target)} 面向目标(它朝面朝方向放,不面向等于空放);</li>
+ *   <li>{@code getSlashArts().doArts(type, user)} 拿目标 combo;</li>
+ *   <li><b>post {@link SlashBladeEvent.PerformSlashArtEvent}</b>——这是拔刀剑释放剑技的事件钩子,别的模组
+ *       和拔刀剑自己都靠它。跳过它,最后的收尾段就出不来;</li>
+ *   <li>取 {@code event.getComboState()}(事件可能改写),判非取消、非 NONE,再 {@code updateComboSeq}。</li>
+ * </ol>
+ * 上一版漏了第 3 步,导致「起手能放、最后的收尾段放不出」。
  *
- * <h2>程序化搓招(不让大模型想怎么搓)</h2>
- * 剑技的全部动作、连段与特效由服务端预置。{@link #art} 放单招(指定档次或随机),{@link #combo} 放一整套
- * 连击(随机起手一条完整连段)。模型不要自己编排挥刀序列。
+ * <h2>预制招式:绕开蓄力,按「档」取招</h2>
+ * 真人放 SA 要长按右键、按蓄力时长判「普通/完美/失败」,完美窗口只有 3~4 tick。但程序不经过那条判定:
+ * {@link SlashArts#doArts} 按 {@code ArtsType} 直接返回目标 combo,{@code elapsed} 只是喂给事件的一个口径
+ * (完美=10、普通=20,照车万女仆),不影响成败。超SA 走 {@link SuperSlashArts#releaseSSA}(额外耗一半耐久)。
  */
 public final class SlashBlade {
 
@@ -144,15 +154,25 @@ public final class SlashBlade {
 
     /**
      * 放一次剑技(SA)。{@code type} 是 {@code normal} / {@code just} / {@code super} / {@code random} 之一。
-     *
-     * <p><b>完全预制、绕开蓄力</b>:普通/完美直接经 {@link SlashArts#doArts} 按档位拿 combo、切过去,多段由
-     * {@link SlashBladeTicker} 逐 tick 播完;超SA 走官方 {@link SuperSlashArts#releaseSSA}。{@code random} 时
-     * 服务端按刀状态随机挑一个能放的档次(能超SA 就一半概率超SA,否则普通/完美各半)。{@code super} 不够格
-     * 直接失败给 reason,不静默降级。
+     * 不带目标:只放,不替你面向(调用方负责先转身)。
      */
     public static Art art(LivingEntity entity, ItemStack blade, String type) {
+        return art(entity, blade, type, null);
+    }
+
+    /**
+     * 放一次剑技,带目标——放之前 {@code lookAt(FEET, target)} 面向它。{@code target} 为 null 时不面向。
+     *
+     * <p><b>完全预制、绕开蓄力</b>:普通/完美直接经 {@link SlashArts#doArts} 按档位拿 combo、post
+     * {@link SlashBladeEvent.PerformSlashArtEvent}、切过去,多段由 {@link SlashBladeTicker} 逐 tick 播完;
+     * 超SA 走官方 {@link SuperSlashArts#releaseSSA}。{@code random} 时按刀状态随机挑档。
+     */
+    public static Art art(LivingEntity entity, ItemStack blade, String type, Entity target) {
         if (!isSlashBlade(blade)) {
             return new Art(false, "", "no slash blade in your main hand");
+        }
+        if (target != null) {
+            entity.lookAt(EntityAnchorArgument.Anchor.FEET, target.position());
         }
         String t = type == null ? "random" : type.toLowerCase(Locale.ROOT);
         // random 要在「放超SA」上走 releaseSSA,不能把 Super 混进 doArts 的普通/完美里(那会绕开耐久消耗)
@@ -160,7 +180,6 @@ public final class SlashBlade {
             if (canSuper(blade, entity) && entity.getRandom().nextBoolean()) {
                 return superArtImpl(entity, blade);
             }
-            // 放不出超SA 时普通/完美各半
             SlashArts.ArtsType half = entity.getRandom().nextBoolean()
                     ? SlashArts.ArtsType.Success : SlashArts.ArtsType.Jackpot;
             return blade.getCapability(ItemSlashBlade.BLADESTATE)
@@ -180,8 +199,8 @@ public final class SlashBlade {
     }
 
     /**
-     * 放一次普通/完美剑技——先判断刀/封印/是否附魔,再按已定档位切 combo。
-     * 注意:超SA 不走这里(它要耗一半耐久),见 {@link #superArtImpl}。
+     * 放一次普通/完美剑技——照车万女仆 {@code SlashBladeAttackUtils.doSlashArts}:post
+     * {@link SlashBladeEvent.PerformSlashArtEvent},取事件改写的 combo 再切。超SA 不走这里(要耗一半耐久)。
      */
     private static Art doArt(LivingEntity entity, ISlashBladeState state, SlashArts.ArtsType artsType) {
         if (state.isBroken()) {
@@ -193,11 +212,20 @@ public final class SlashBlade {
         if (!SwordType.from(entity.getMainHandItem()).contains(SwordType.ENCHANTED)) {
             return new Art(false, artOf(state), "this blade is not enchanted; it has no slash art yet");
         }
-        ResourceLocation combo = state.getSlashArts().doArts(artsType, entity);
-        if (combo == null || combo.equals(ComboStateRegistry.NONE.getId())) {
+        int elapsed = artsType == SlashArts.ArtsType.Jackpot ? 10 : 20;
+        ResourceLocation comboLoc = state.getSlashArts().doArts(artsType, entity);
+        SlashBladeEvent.PerformSlashArtEvent event =
+                new SlashBladeEvent.PerformSlashArtEvent(entity, elapsed, state, comboLoc, artsType);
+        MinecraftForge.EVENT_BUS.post(event);
+        if (event.isCanceled()) {
+            return new Art(false, artOf(state), "the slash art was cancelled");
+        }
+        comboLoc = event.getComboState();
+        ComboState combo = ComboStateRegistry.REGISTRY.get().getValue(comboLoc);
+        if (combo == null || Objects.equals(comboLoc, ComboStateRegistry.NONE.getId())) {
             return new Art(false, artOf(state), "this blade's slash art is not supported");
         }
-        state.updateComboSeq(entity, combo);
+        state.updateComboSeq(entity, comboLoc);
         entity.swing(InteractionHand.MAIN_HAND);
         return new Art(true, artOf(state), "");
     }
