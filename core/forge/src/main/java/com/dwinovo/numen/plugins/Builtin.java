@@ -43,7 +43,10 @@ public final class Builtin {
                 skills -> () -> com.dwinovo.numen.plugins.tacz.NumenTacz.install(modBus, skills));
         gate.open("epicfight", "epicfight",
                 skills -> () -> com.dwinovo.numen.plugins.epicfight.NumenEpicFight.install(modBus, skills));
+        gate.open("slashblade", "slashblade",
+                skills -> () -> com.dwinovo.numen.plugins.slashblade.NumenSlashBlade.install(modBus, skills));
         // 注:这个 MC 版本上车万女仆没有按坐标播语音的口,所以那个联动只做模型不做语音。
+        // 注:拔刀剑(SlashBlade:Resharped)与史诗战斗是两个模组、两套系统,联动各接各的,互不干扰。
     }
 
     /** YSM 联动只写原版;它要的加载器专属的两件事,Forge 的答案在这里。 */

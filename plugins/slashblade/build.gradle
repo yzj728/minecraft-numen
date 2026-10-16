@@ -1,0 +1,30 @@
+plugins {
+    id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+    id 'numen-plugin'
+}
+
+// 拔刀剑(SlashBlade:Resharped)只发 Forge 1.20.1 版,本联动只在 Forge 上存在,编译对着 Forge。Fabric/NeoForge
+// 那边没有它,也不需要有——拔刀剑和史诗战斗是两回事,各自一套;本体(车万女仆)的拔刀剑兼容走的就是
+// `AttackManager.doSlash`,本联动照抄它,不是史诗战斗的 `PlayerPatch` 那一套。
+minecraft {
+    mappings channel: 'official', version: minecraft_version
+}
+
+repositories {
+    // 拔刀剑发在 Modrinth,经 Modrinth Maven 转成 maven 坐标。
+    // 不用 exclusiveContent:ForgeGradle 的 fg.deobf 从项目的仓库列表里找原件,认不得那一层包装。
+    maven {
+        name = 'Modrinth'
+        url = 'https://api.modrinth.com/maven'
+        content { includeGroup 'maven.modrinth' }
+    }
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
+    // 瘦 api jar 取 Forge 那份:本联动本来就只跑在 Forge 上
+    compileOnly files(project(':api:forge').tasks.named('apiJar'))
+    // 运行时由玩家自己装的那份提供;本模块不携带拔刀剑一个字节。8T53F0sy 是 SlashBlade:Resharped 的 Modrinth
+    // 项目 id,1.9.65 是 1.20.1 线的当前正式版(version id `pdMMavGH`),见 gradle.properties 的 slashblade_version。
+    compileOnly fg.deobf("maven.modrinth:slashblade-resharped:${slashblade_version}")
+}
