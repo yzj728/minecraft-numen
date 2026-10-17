@@ -14,6 +14,7 @@ import net.minecraft.util.RandomSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
 
@@ -36,8 +37,8 @@ import java.util.Objects;
  * <h2>释放前置:锁定目标(关键)</h2>
  * 很多 SA(后撤飞剑 / 聚怪次元炸 / 召唤机器人戳 / 次元斩)的触发前提是「刀有一个<b>已锁定目标</b>」
  * ({@code state.setTargetEntityId})。真人靠「潜行键」锁定,假玩家没有那个动作,所以之前这些 SA 放不出,
- * 而「多道剑气 / 范围次元斩绝」这类不依赖锁定的就能放——这正好解释了「三把里只有一把能放」。
- * 这里放招前先 {@code state.setTargetEntityId(target)} 补上锁定。
+ * 而「多道剑气 / 范围次元斩绝」这类不依赖锁定的就能放——这解释了「三把里只有一把能放」。
+ * 这里放招前先 {@code state.setTargetEntityId(target)} 补上锁定;没显式给目标时用 {@link #nearestTarget} 自动找。
  */
 public final class SlashBlade {
 
@@ -121,9 +122,29 @@ public final class SlashBlade {
                 .orElse(false);
     }
 
-    /** 放一次剑技(SA)。{@code type} = normal/just/super/random。 */
+    /**
+     * 附近最近的敌对生物(16 格内),作为 SA 的锁定目标。假玩家不会按潜行锁定,放招前用这个补一个目标。
+     * 找不到返回 null。
+     */
+    public static LivingEntity nearestTarget(LivingEntity entity) {
+        LivingEntity best = null;
+        double bestDist = Double.MAX_VALUE;
+        for (LivingEntity other : entity.level()
+                .getEntitiesOfClass(LivingEntity.class, entity.getBoundingBox().inflate(16.0, 8.0, 16.0),
+                        e -> e != entity && e.isAlive() && !e.isSpectator() && (e instanceof Enemy || e.getLastHurtByMob() == entity
+                                || (e instanceof net.minecraft.world.entity.Mob mob && mob.getTarget() == entity)))) {
+            double d = entity.distanceToSqr(other);
+            if (d < bestDist) {
+                best = other;
+                bestDist = d;
+            }
+        }
+        return best;
+    }
+
+    /** 放一次剑技(SA)。{@code type} = normal/just/super/random。不带目标时自动找最近的敌对生物。 */
     public static Art art(LivingEntity entity, ItemStack blade, String type) {
-        return art(entity, blade, type, null);
+        return art(entity, blade, type, nearestTarget(entity));
     }
 
     /** 放一次剑技,带目标——放之前面向目标 + 锁定目标。 */
@@ -165,7 +186,6 @@ public final class SlashBlade {
 
     /**
      * 放一次剑技:先给刀设置锁定目标(很多 SA 的前置),再 doArts 取 combo → updateComboSeq 切过去。
-     * 1.1.23 没有 PerformSlashArtEvent 事件钩子,所以 doArts 后直接切。
      */
     private static Art doArt(LivingEntity entity, ISlashBladeState state, SlashArts.ArtsType artsType, Entity target) {
         if (state.isBroken()) {
@@ -177,7 +197,7 @@ public final class SlashBlade {
         if (!SwordType.from(entity.getMainHandItem()).contains(SwordType.ENCHANTED)) {
             return new Art(false, artOf(state), "this blade is not enchanted; it has no slash art yet");
         }
-        // 锁定目标:很多 SA(后撤飞剑/聚怪次元炸/召唤物戳)的触发前提,假玩家不会按潜行锁定,这里手动设。
+        // 锁定目标:很多 SA(后撤飞剑/聚怪次元炸/召唤物戳)的触发前提。
         if (target != null) {
             state.setTargetEntityId(target.getId());
         }
