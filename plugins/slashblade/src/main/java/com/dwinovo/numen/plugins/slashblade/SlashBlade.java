@@ -29,16 +29,17 @@ import java.util.Objects;
 /**
  * 本插件对接拔刀剑(SlashBlade:Resharped)的那一面——<b>唯一</b>知道拔刀剑类型的地方。
  *
- * <h2>核心:用拔刀剑原生 {@code doArts} 按「刀当前附的 SA」放招</h2>
- * 所有 SA(原版 / star_fantasy / slashblade_addon / murasame)都是统一接口:
- * <pre>
- *   state.getSlashArts().doArts(type, entity) → combo key → state.updateComboSeq(entity, combo)
- * </pre>
- * 后台不需要知道「这刀是什么 SA」,也不硬编码映射。
+ * <h2>核心:连段流(照车万女仆「真正的力量」)</h2>
+ * 车万女仆能让「多种招式都能放」,秘籍是<b>连段流</b>:
+ * <ul>
+ *   <li>普通攻击 = 连段推进({@link #advanceCombo}:{@code progressCombo} 逐段走 COMBO_A/B/C,疾走居合、挑空、空中技都在连段里自然出现);</li>
+ *   <li>SA = 节奏到了({@link #trySlashArts}:{@code doArts} + {@code updateComboSeq})额外放的大招;</li>
+ *   <li>超SA = 评价够({@link #canSuper})时放 {@code doArts(Super)}。</li>
+ * </ul>
+ * 不是「点名调什么招式」,而是「连段推进 + 节奏放 SA」自然交替。
  *
- * <h2>释放前置:锁定目标 + 评价等级(两个都关键)</h2>
- * 「锁定目标」:很多 SA(后撤飞剑/聚怪次元炸/召唤物戳/次元斩)需要刀有<b>已锁定目标</b>,假玩家不按潜行,放招前补。
- * 「评价等级」:拔刀剑的 SA 释放与伤害依赖评价,假玩家死亡重生换新实体后评价归零,放招前顶满 SSS。
+ * <h2>释放前置:锁定目标 + 评价等级</h2>
+ * 锁定目标(后撤飞剑/次元斩等 SA 的前置)与评价等级(死亡重生换新实体后归零)都要放招前补上。
  */
 public final class SlashBlade {
 
@@ -130,7 +131,7 @@ public final class SlashBlade {
         });
     }
 
-    /** 附近最近的「够得着、看得见」的敌对生物。找不到返回 null(宁可空,不空挥)。 */
+    /** 附近最近的「够得着、看得见」的敌对生物。找不到返回 null。 */
     public static LivingEntity nearestTarget(LivingEntity entity) {
         LivingEntity best = null;
         double bestDist = Double.MAX_VALUE;
@@ -161,6 +162,86 @@ public final class SlashBlade {
         return best;
     }
 
+    // ==================== 连段流(车万女仆模型) ====================
+
+    /**
+     * 放一次 SA——连段流的「大招」环节。评价够(妖+锐利+满耐久)放超SA,否则放普通 SA。
+     * 照车万女仆 {@code doSlashArts}:doArts 取 combo → updateComboSeq。1.1.23 无 PerformSlashArtEvent,直接切。
+     * 放之前补锁定目标 + 拉满评价 + 面向目标。
+     */
+    public static boolean trySlashArts(LivingEntity entity, ItemStack blade, LivingEntity target) {
+        if (!isSlashBlade(blade)) {
+            return false;
+        }
+        entity.lookAt(EntityAnchorArgument.Anchor.FEET, target.position());
+        return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
+            if (state.isBroken() || state.isSealed()) {
+                return false;
+            }
+            if (!SwordType.from(blade).contains(SwordType.ENCHANTED)) {
+                return false;
+            }
+            // 锁定目标 + 拉满评价
+            state.setTargetEntityId(target.getId());
+            fullRank(entity);
+            // 够格放超SA 就放超SA,否则普通 SA
+            SlashArts.ArtsType type = canSuper(blade, entity) ? SlashArts.ArtsType.Super : SlashArts.ArtsType.Success;
+            ResourceLocation comboLoc = state.getSlashArts().doArts(type, entity);
+            ComboState combo = ComboStateRegistry.REGISTRY.get().getValue(comboLoc);
+            if (combo == null || Objects.equals(comboLoc, ComboStateRegistry.NONE.getId())) {
+                return false;
+            }
+            state.updateComboSeq(entity, comboLoc);
+            entity.swing(InteractionHand.MAIN_HAND);
+            return true;
+        }).orElse(false);
+    }
+
+    /**
+     * 普通连段推进——连段流的「普通攻击」环节。照车万女仆 {@code normalSlashBladeAttack}:
+     * 当前连段是 NONE 或即将结束 → 起手新连段(地面 COMBO_A / 疾走居合 / 挑空,空中 AERIAL_CLEAVE);
+     * 否则 {@code progressCombo} 推进下一段。疾走居合、挑空、空中技都在这个连段推进里自然出现。
+     */
+    public static boolean advanceCombo(LivingEntity entity, ItemStack blade, LivingEntity target) {
+        if (!isSlashBlade(blade)) {
+            return false;
+        }
+        entity.lookAt(EntityAnchorArgument.Anchor.FEET, target.position());
+        return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
+            ResourceLocation cur = state.resolvCurrentComboState(entity);
+            ComboState current = ComboStateRegistry.REGISTRY.get().getValue(cur);
+            if (current == null) {
+                current = ComboStateRegistry.NONE.get();
+            }
+            // 起手:当前空闲(NONE)或连段即将收尾(next==NONE)时,按地面/空中起手一段新连段
+            boolean idle = cur.equals(ComboStateRegistry.NONE.getId())
+                    || current.getNext(entity).equals(ComboStateRegistry.NONE.getId());
+            if (idle) {
+                if (entity.onGround()) {
+                    // 地面起手:COMBO_A、疾走居合、挑空 三者随机,让连段变化丰富
+                    int r = entity.getRandom().nextInt(6);
+                    if (r == 0) {
+                        state.updateComboSeq(entity, ComboStateRegistry.RAPID_SLASH.getId());
+                    } else if (r == 1) {
+                        state.updateComboSeq(entity, ComboStateRegistry.UPPERSLASH.getId());
+                    } else {
+                        state.updateComboSeq(entity, ComboStateRegistry.COMBO_A1.getId());
+                    }
+                } else {
+                    state.updateComboSeq(entity, ComboStateRegistry.AERIAL_CLEAVE.getId());
+                }
+                entity.swing(InteractionHand.MAIN_HAND);
+                return true;
+            }
+            // 推进下一段
+            state.progressCombo(entity);
+            entity.swing(InteractionHand.MAIN_HAND);
+            return true;
+        }).orElse(false);
+    }
+
+    // ==================== 动作级口子(供模型显式调用) ====================
+
     /** 放一次剑技(SA)。{@code type} = normal/just/super/auto/random。不带目标时自动找最近敌对生物。 */
     public static Art art(LivingEntity entity, ItemStack blade, String type) {
         return art(entity, blade, type, nearestTarget(entity));
@@ -175,15 +256,12 @@ public final class SlashBlade {
             entity.lookAt(EntityAnchorArgument.Anchor.FEET, target.position());
         }
         String t = type == null ? "auto" : type.toLowerCase(Locale.ROOT);
-
-        // auto:够放超SA 就放超SA,否则放普通 SA。这是「评分到 3S 放超SA、没到就放普通 SA」的精确语义。
         if ("auto".equals(t)) {
             SlashArts.ArtsType arts = canSuper(blade, entity) ? SlashArts.ArtsType.Super : SlashArts.ArtsType.Success;
             return blade.getCapability(ItemSlashBlade.BLADESTATE)
                     .map(state -> doArt(entity, state, arts, target))
                     .orElse(new Art(false, "", "the slash blade has no blade state"));
         }
-
         if ("super".equals(t)) {
             if (!canSuper(blade, entity)) {
                 return new Art(false, artKey(blade),
@@ -212,9 +290,7 @@ public final class SlashBlade {
         }).orElse(new Art(false, "", "the slash blade has no blade state"));
     }
 
-    /**
-     * 放一次剑技:先补锁定目标 + 拉满评价(两个前置),再 doArts 取 combo → updateComboSeq 切过去。
-     */
+    /** 放一次剑技:先补锁定目标 + 拉满评价,再 doArts 取 combo → updateComboSeq 切过去。 */
     private static Art doArt(LivingEntity entity, ISlashBladeState state, SlashArts.ArtsType artsType, Entity target) {
         if (state.isBroken()) {
             return new Art(false, artOf(state), "the blade is broken; repair it first");
@@ -225,11 +301,9 @@ public final class SlashBlade {
         if (!SwordType.from(entity.getMainHandItem()).contains(SwordType.ENCHANTED)) {
             return new Art(false, artOf(state), "this blade is not enchanted; it has no slash art yet");
         }
-        // 前置一:锁定目标(很多 SA 的触发前提)。
         if (target != null) {
             state.setTargetEntityId(target.getId());
         }
-        // 前置二:拉满评价。
         fullRank(entity);
         ResourceLocation comboLoc = state.getSlashArts().doArts(artsType, entity);
         ComboState combo = ComboStateRegistry.REGISTRY.get().getValue(comboLoc);
@@ -241,16 +315,13 @@ public final class SlashBlade {
         return new Art(true, artOf(state), "");
     }
 
-    /** 放一次超SA 的别名——= 终极 SA(超级变式,按当前刀)。 */
+    /** 放一次超SA 的别名。 */
     public static Action superArt(LivingEntity entity, ItemStack blade) {
         SlashBlade.Art done = art(entity, blade, "super");
         return new Action(done.executed(), done.reason());
     }
 
-    /**
-     * 直接释放一个具体招式,完全跳过搓招/ComboState。
-     * {@code move} = rapid_slash(疾走居合)/upperslash(挑空)/upperslash_jump(跃升斩)/aerial_cleave(空中下劈)/rising_star(晨星)。
-     */
+    /** 直接释放一个具体招式(疾走居合/挑空/跃升斩/空中下劈/晨星),doSlash 直调。 */
     public static Action release(LivingEntity entity, ItemStack blade, String move) {
         if (!isSlashBlade(blade)) {
             return new Action(false, "no slash blade in your main hand");
@@ -271,7 +342,7 @@ public final class SlashBlade {
         return new Action(true, "");
     }
 
-    /** 疾走居合:瞬移式前冲(朝面朝方向)+ 连续多段刀光。 */
+    /** 疾走居合:瞬移式前冲 + 连续多段刀光。 */
     private static void releaseRapidSlash(LivingEntity entity) {
         Vec3 look = entity.getLookAngle();
         Vec3 target = entity.position().add(look.x * 3.0, 0, look.z * 3.0);
@@ -282,7 +353,7 @@ public final class SlashBlade {
         }
     }
 
-    /** 挑空 / 跃升斩:挑空(或升空)+ 上挥刀光。 */
+    /** 挑空 / 跃升斩。 */
     private static void releaseUpperSlash(LivingEntity entity, boolean jump) {
         if (jump) {
             entity.setDeltaMovement(0, 0.6, 0);
@@ -295,7 +366,7 @@ public final class SlashBlade {
         }
     }
 
-    /** 空中下劈:向下的重击刀光。 */
+    /** 空中下劈。 */
     private static void releaseAerialCleave(LivingEntity entity) {
         AttackManager.doSlash(entity, 55, Vec3.ZERO, true, true, 0.44, KnockBacks.meteor);
     }
@@ -325,9 +396,7 @@ public final class SlashBlade {
         return new Action(true, "");
     }
 
-    /**
-     * 逐 tick 推进刀当前的 combo 时间线,让判断斩这类「tickAction 型」SA 的多段特效能被假玩家放出。
-     */
+    /** 逐 tick 推进刀当前 combo 时间线,让 tickAction 型 SA 的多段特效放出。由 SlashBladeTicker 调用。 */
     public static void tickAction(LivingEntity entity) {
         ItemStack blade = entity.getMainHandItem();
         if (!isSlashBlade(blade)) {
