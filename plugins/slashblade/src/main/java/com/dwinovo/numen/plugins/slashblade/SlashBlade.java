@@ -6,6 +6,7 @@ import mods.flammpfeil.slashblade.item.ItemSlashBlade;
 import mods.flammpfeil.slashblade.item.SwordType;
 import mods.flammpfeil.slashblade.registry.ComboStateRegistry;
 import mods.flammpfeil.slashblade.registry.combo.ComboState;
+import mods.flammpfeil.slashblade.slasharts.JudgementCut;
 import mods.flammpfeil.slashblade.slasharts.SlashArts;
 import mods.flammpfeil.slashblade.util.AttackManager;
 import mods.flammpfeil.slashblade.util.KnockBacks;
@@ -29,17 +30,12 @@ import java.util.Objects;
 /**
  * 本插件对接拔刀剑(SlashBlade:Resharped)的那一面——<b>唯一</b>知道拔刀剑类型的地方。
  *
- * <h2>核心:连段流(照车万女仆「真正的力量」)</h2>
- * 车万女仆能让「多种招式都能放」,秘籍是<b>连段流</b>:
- * <ul>
- *   <li>普通攻击 = 连段推进({@link #advanceCombo}:{@code progressCombo} 逐段走 COMBO_A/B/C,疾走居合、挑空、空中技都在连段里自然出现);</li>
- *   <li>SA = 节奏到了({@link #trySlashArts}:{@code doArts} + {@code updateComboSeq})额外放的大招;</li>
- *   <li>超SA = 评价够({@link #canSuper})时放 {@code doArts(Super)}。</li>
- * </ul>
- * 不是「点名调什么招式」,而是「连段推进 + 节奏放 SA」自然交替。
- *
- * <h2>释放前置:锁定目标 + 评价等级</h2>
- * 锁定目标(后撤飞剑/次元斩等 SA 的前置)与评价等级(死亡重生换新实体后归零)都要放招前补上。
+ * <h2>连段流 + SA 特效补丁</h2>
+ * 连段流(照车万女仆):普通剑技是连段推进,SA 是节奏到了额外放的大招,超SA 是评价够时放。
+ * 但「判断斩」这类 SA 的<b>特效</b>在 {@code ComboState.tickAction} 的 {@code TimeLineTickAction.put(0, …)}
+ * 里,靠 ticker 逐刻驱动,而假玩家的 ticker 时序对不齐,于是切过去「后退、收刀都出了,唯独中间召唤次元斩
+ * 特效没出」。修法:放 SA 后,对「判断斩类 SA」<b>直接调原版 {@link JudgementCut} helper</b>立即生成次元斩实体——
+ * 这和 {@code doSlash} 生成实体是同一条已验证可用的链路,不等 ticker。
  */
 public final class SlashBlade {
 
@@ -123,7 +119,7 @@ public final class SlashBlade {
                 .orElse(false);
     }
 
-    /** 把假玩家的评价等级顶满 SSS(1800)——死亡重生换新实体评价归零,放招前置拉满。 */
+    /** 把假玩家的评价等级顶满 SSS(1800)。 */
     private static void fullRank(LivingEntity entity) {
         entity.getCapability(CapabilityConcentrationRank.RANK_POINT).ifPresent(rank -> {
             rank.setRawRankPoint(1800);
@@ -162,12 +158,11 @@ public final class SlashBlade {
         return best;
     }
 
-    // ==================== 连段流(车万女仆模型) ====================
+    // ==================== 连段流 ====================
 
     /**
-     * 放一次 SA——连段流的「大招」环节。评价够(妖+锐利+满耐久)放超SA,否则放普通 SA。
-     * 照车万女仆 {@code doSlashArts}:doArts 取 combo → updateComboSeq。1.1.23 无 PerformSlashArtEvent,直接切。
-     * 放之前补锁定目标 + 拉满评价 + 面向目标。
+     * 放一次 SA——评价够放超SA,否则普通 SA。放完 doArts+updateComboSeq 后,对「判断斩类 SA」额外
+     * 直调 {@link JudgementCut} helper 立即补特效(见类注释)。
      */
     public static boolean trySlashArts(LivingEntity entity, ItemStack blade, LivingEntity target) {
         if (!isSlashBlade(blade)) {
@@ -181,11 +176,10 @@ public final class SlashBlade {
             if (!SwordType.from(blade).contains(SwordType.ENCHANTED)) {
                 return false;
             }
-            // 锁定目标 + 拉满评价
             state.setTargetEntityId(target.getId());
             fullRank(entity);
-            // 够格放超SA 就放超SA,否则普通 SA
-            SlashArts.ArtsType type = canSuper(blade, entity) ? SlashArts.ArtsType.Super : SlashArts.ArtsType.Success;
+            boolean sup = canSuper(blade, entity);
+            SlashArts.ArtsType type = sup ? SlashArts.ArtsType.Super : SlashArts.ArtsType.Success;
             ResourceLocation comboLoc = state.getSlashArts().doArts(type, entity);
             ComboState combo = ComboStateRegistry.REGISTRY.get().getValue(comboLoc);
             if (combo == null || Objects.equals(comboLoc, ComboStateRegistry.NONE.getId())) {
@@ -193,14 +187,28 @@ public final class SlashBlade {
             }
             state.updateComboSeq(entity, comboLoc);
             entity.swing(InteractionHand.MAIN_HAND);
+            // 判断斩类 SA:补立即特效,不等 ticker(ticker 时序对不齐会漏掉「召唤次元斩」那一击)。
+            patchJudgementCutArt(entity, blade, sup);
             return true;
         }).orElse(false);
     }
 
+    /** 对「判断斩类」SA 补特效:普通/完美 = 后退+球状次元斩,超 = 48 格锁定次元斩。非判断斩不动作。 */
+    private static void patchJudgementCutArt(LivingEntity entity, ItemStack blade, boolean sup) {
+        String key = artKey(blade);
+        if (key == null || !key.endsWith("judgement_cut")) {
+            return;   // 非判断斩类 SA,不补(它们或自带 clickAction,或非本修复范围)
+        }
+        if (sup) {
+            JudgementCut.doJudgementCutSuper(entity);
+        } else {
+            JudgementCut.doJudgementCut(entity);
+        }
+    }
+
     /**
-     * 普通连段推进——连段流的「普通攻击」环节。照车万女仆 {@code normalSlashBladeAttack}:
-     * 当前连段是 NONE 或即将结束 → 起手新连段(地面 COMBO_A / 疾走居合 / 挑空,空中 AERIAL_CLEAVE);
-     * 否则 {@code progressCombo} 推进下一段。疾走居合、挑空、空中技都在这个连段推进里自然出现。
+     * 普通连段推进:当前连段空闲/将结束 → 按地面/空中起手(COMBO_A/疾走居合/挑空/空中技随机);
+     * 否则 progressCombo 推进下一段。
      */
     public static boolean advanceCombo(LivingEntity entity, ItemStack blade, LivingEntity target) {
         if (!isSlashBlade(blade)) {
@@ -213,12 +221,10 @@ public final class SlashBlade {
             if (current == null) {
                 current = ComboStateRegistry.NONE.get();
             }
-            // 起手:当前空闲(NONE)或连段即将收尾(next==NONE)时,按地面/空中起手一段新连段
             boolean idle = cur.equals(ComboStateRegistry.NONE.getId())
                     || current.getNext(entity).equals(ComboStateRegistry.NONE.getId());
             if (idle) {
                 if (entity.onGround()) {
-                    // 地面起手:COMBO_A、疾走居合、挑空 三者随机,让连段变化丰富
                     int r = entity.getRandom().nextInt(6);
                     if (r == 0) {
                         state.updateComboSeq(entity, ComboStateRegistry.RAPID_SLASH.getId());
@@ -233,21 +239,20 @@ public final class SlashBlade {
                 entity.swing(InteractionHand.MAIN_HAND);
                 return true;
             }
-            // 推进下一段
             state.progressCombo(entity);
             entity.swing(InteractionHand.MAIN_HAND);
             return true;
         }).orElse(false);
     }
 
-    // ==================== 动作级口子(供模型显式调用) ====================
+    // ==================== 动作级口子 ====================
 
-    /** 放一次剑技(SA)。{@code type} = normal/just/super/auto/random。不带目标时自动找最近敌对生物。 */
+    /** 放一次剑技(SA)。{@code type} = normal/just/super/auto/random。 */
     public static Art art(LivingEntity entity, ItemStack blade, String type) {
         return art(entity, blade, type, nearestTarget(entity));
     }
 
-    /** 放一次剑技,带目标——放之前面向目标 + 锁定目标 + 拉满评价。 */
+    /** 放一次剑技,带目标。 */
     public static Art art(LivingEntity entity, ItemStack blade, String type, Entity target) {
         if (!isSlashBlade(blade)) {
             return new Art(false, "", "no slash blade in your main hand");
@@ -290,7 +295,7 @@ public final class SlashBlade {
         }).orElse(new Art(false, "", "the slash blade has no blade state"));
     }
 
-    /** 放一次剑技:先补锁定目标 + 拉满评价,再 doArts 取 combo → updateComboSeq 切过去。 */
+    /** 放一次剑技:先补锁定+拉满评价,再 doArts → updateComboSeq。判断斩类补 helper 特效。 */
     private static Art doArt(LivingEntity entity, ISlashBladeState state, SlashArts.ArtsType artsType, Entity target) {
         if (state.isBroken()) {
             return new Art(false, artOf(state), "the blade is broken; repair it first");
@@ -312,6 +317,8 @@ public final class SlashBlade {
         }
         state.updateComboSeq(entity, comboLoc);
         entity.swing(InteractionHand.MAIN_HAND);
+        // 判断斩类补特效
+        patchJudgementCutArt(entity, entity.getMainHandItem(), artsType == SlashArts.ArtsType.Super);
         return new Art(true, artOf(state), "");
     }
 
@@ -396,7 +403,7 @@ public final class SlashBlade {
         return new Action(true, "");
     }
 
-    /** 逐 tick 推进刀当前 combo 时间线,让 tickAction 型 SA 的多段特效放出。由 SlashBladeTicker 调用。 */
+    /** 逐 tick 推进刀当前 combo 时间线。由 SlashBladeTicker 调用。 */
     public static void tickAction(LivingEntity entity) {
         ItemStack blade = entity.getMainHandItem();
         if (!isSlashBlade(blade)) {
