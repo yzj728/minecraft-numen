@@ -15,9 +15,9 @@ import java.nio.file.Path;
  * 都不会被加载</b>,而这一点是必须的:本联动直接编译依赖它的类({@code ItemSlashBlade}、
  * {@code AttackManager}、{@code SuperSlashArts}),类加载了就会去找那些类。
  *
- * <p>挂两样:<b>{@link SlashBladeMelee}</b>(主手是拔刀剑时,近战挥击接管成走拔刀剑自己的攻击管线,冷却到放
- * 剑技、冷却中照旧平A)、<b>{@link SlashBladeWeapon}</b>(让拔刀剑按真实伤害公式报近战评分,赢过铁剑)。
- * 剑技与招式全部直接生成刀光实体({@code AttackManager.doSlash}),不依赖 ComboState 状态机,所以无需逐刻驱动的 ticker。
+ * <p>挂三样:<b>{@link SlashBladeMelee}</b>(主手是拔刀剑时,近战挥击接管成走拔刀剑自己的攻击管线,冷却到放
+ * 剑技、冷却中照旧平A)、<b>{@link SlashBladeWeapon}</b>(让拔刀剑按真实伤害公式报近战评分,赢过铁剑)、
+ * <b>{@link SlashBladeTicker}</b>(每服务端刻推进 combo 时间线,让判断斩这类 tickAction 型 SA 的多段特效完整播放)。
  * 和史诗战斗({@code PlayerPatch} 那套)是两条完全不同的路,本联动不碰它。
  */
 public final class NumenSlashBlade {
@@ -35,6 +35,8 @@ public final class NumenSlashBlade {
         MeleeWeapons.register(new SlashBladeWeapon());
         NumenPlugins.register(NAMESPACE, numen -> {
             SlashBladeApi.install(numen);
+            // 每服务端刻推进 combo 时间线,让判断斩这类 SA 的多段特效完整播完(假玩家没有被动 tick 链)
+            SlashBladeTicker.watch(numen);
             if (skillsRoot != null) {
                 numen.bundleSkills(skillsRoot);
             }
