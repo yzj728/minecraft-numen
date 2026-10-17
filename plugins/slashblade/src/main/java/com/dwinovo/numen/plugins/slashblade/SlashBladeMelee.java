@@ -10,24 +10,22 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 主手是拔刀剑时接管近战挥击。做两件事:
+ * 主手是拔刀剑时接管近战挥击。优先级:
  * <ol>
- *   <li><b>冷却到了放剑技</b>:生成多段刀光(和平A 同一条 {@code AttackManager.doSlash} 链路),伤害各自结算;</li>
- *   <li><b>冷却中照旧平A</b>:{@code fighter.attack + swing}——主手是拔刀剑时,这条原版平A 走
- *       {@code Player.attack → ItemSlashBlade.hurtEnemy → combo hitEffect},本身就是有效的拔刀剑刀光+伤害
- *       (已验证)。所以冷却中不瞎折腾,交给原版平A。</li>
+ *   <li><b>能放超SA 就放超SA</b>(妖+锐利边缘+满耐久+地面+评价 S,{@code art("super")});</li>
+ *   <li><b>否则放普通 SA</b>({@code art("normal")},评分没到 3S 前也照放普通 SA,而不是平挥);</li>
+ *   <li><b>普通 SA 也放不出</b>(断刀/封印/未附魔/无 SA)才退回原版平A。</li>
  * </ol>
  *
- * <p>关键:这里<b>必须</b>在冷却中也返回 true 并自己平A,因为 core 的 {@code AttackCompanionTask.tickWeapon} 一旦
- * 进了 {@code MeleeStyle.strike} 且返回 true,就 {@code return} 不再走它自己的原版平A——若这里冷却中什么都不做
- * 就返回 true,等于把「本来能打的平A」吞掉了,表现就是「既放不出剑技、又不再平A」。
+ * <p>冷却只做「节流」,不让每 tick 狂放剑技烧骄傲之魂;但保证「够格就优先放 SA」,尤其评分没到之前
+ * 也要放<b>普通 SA</b>,而不是死等 3S 才动手。
  */
 final class SlashBladeMelee implements MeleeStyle {
 
     private static final Logger LOG = LoggerFactory.getLogger("numen-slashblade");
 
-    /** 两次剑技之间的最小间隔(tick)。 */
-    private static final int ART_COOLDOWN_TICKS = 30;
+    /** 两次剑技之间的最小间隔(tick)。20 tick = 1 秒,足够节流又不会让她显得迟钝。 */
+    private static final int ART_COOLDOWN_TICKS = 20;
 
     private int lastArtTick;
 
@@ -47,12 +45,24 @@ final class SlashBladeMelee implements MeleeStyle {
 
         if (fighter.tickCount - lastArtTick >= ART_COOLDOWN_TICKS) {
             lastArtTick = fighter.tickCount;
-            SlashBlade.Art done = SlashBlade.art(fighter, blade, "random", target);
+            // 先试超SA:够格(妖+锐利边缘+满耐久+评价 S)就放超SA,否则放普通 SA。
+            String tryType = SlashBlade.canSuper(blade, fighter) ? "super" : "normal";
+            SlashBlade.Art done = SlashBlade.art(fighter, blade, tryType, target);
             if (done.executed()) {
-                LOG.info("拔刀剑剑技:{} 释放了 {} (目标={})", fighter.getName().getString(), done.sa(), target.getId());
+                LOG.info("拔刀剑剑技:{} 释放了 {} (目标={})", fighter.getName().getString(),
+                        tryType.equals("super") ? "super(" + done.sa() + ")" : done.sa(), target.getId());
                 return true;
             }
-            // 放不出(断刀):落回平A
+            // 超SA 不够格时退回来,再明确试一次普通 SA(可能超SA 的妖/锐利判定把普通也挡了):
+            if ("super".equals(tryType)) {
+                SlashBlade.Art normal = SlashBlade.art(fighter, blade, "normal", target);
+                if (normal.executed()) {
+                    LOG.info("拔刀剑剑技:{} 释放了普通 {} (目标={})", fighter.getName().getString(),
+                            normal.sa(), target.getId());
+                    return true;
+                }
+            }
+            // 放不出(断刀/封印/未附魔):落到平A
         }
 
         // 冷却中 / 放不出:原版平A(主手拔刀剑 → ItemSlashBlade.hurtEnemy → 刀光+伤害)
