@@ -1,7 +1,6 @@
 package com.dwinovo.numen.plugins.slashblade;
 
 import mods.flammpfeil.slashblade.capability.slashblade.ISlashBladeState;
-import mods.flammpfeil.slashblade.event.SlashBladeEvent;
 import mods.flammpfeil.slashblade.item.ItemSlashBlade;
 import mods.flammpfeil.slashblade.item.SwordType;
 import mods.flammpfeil.slashblade.registry.ComboStateRegistry;
@@ -17,7 +16,6 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
-import net.minecraftforge.common.MinecraftForge;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -33,12 +31,10 @@ import java.util.Objects;
  * 第三方注册的 {@code xxx:*} 都算)。放剑技的正确做法是:
  * <pre>
  *   ResourceLocation combo = state.getSlashArts().doArts(type, entity);   // 自动按这刀的 SA 取 combo
- *   post PerformSlashArtEvent;                                            // 拔刀剑释放剑技的事件钩子
  *   state.updateComboSeq(entity, combo);                                  // 切过去 = 放这一招
  * </pre>
  * {@code getSlashArts()} 返回的就是<b>这把刀当前附的那个 SlashArts 对象</b>,{@code doArts} 会<b>自动</b>返回它
  * 对应变式的正确 combo——所以后台程序<b>不需要知道「这刀是什么 SA」</b>,也不需要硬编码一张「SA → 接口」的表。
- * 这是车万女仆「真正的力量」{@code SlashBladeAttackUtils.doSlashArts} 的原样口径。
  *
  * <p>上一版错在硬编码了一张只含原版 SA 短名的表,查不到自定义 SA 就「兜底退回次元斩」——于是拿什么刀都放
  * 次元斩。现在去掉那张表和兜底,交给 {@code doArts} 自动选对。
@@ -144,20 +140,36 @@ public final class SlashBlade {
         }
         String t = type == null ? "random" : type.toLowerCase(Locale.ROOT);
         if ("super".equals(t)) {
-            return superArt(entity, blade);
+            if (!canSuper(blade, entity)) {
+                return new Art(false, artKey(blade),
+                        "the blade needs to be bewitched (enchanted + named), fierce-edged (1000+ kills), "
+                                + "unbroken, unsealed, at full durability, and on the ground");
+            }
+            return blade.getCapability(ItemSlashBlade.BLADESTATE)
+                    .map(state -> doArt(entity, state, SlashArts.ArtsType.Super))
+                    .orElse(new Art(false, "", "the slash blade has no blade state"));
         }
-        if ("random".equals(t) && canSuper(blade, entity) && entity.getRandom().nextBoolean()) {
-            return superArt(entity, blade);
+        SlashArts.ArtsType artsType;
+        if ("random".equals(t)) {
+            if (canSuper(blade, entity) && entity.getRandom().nextBoolean()) {
+                return blade.getCapability(ItemSlashBlade.BLADESTATE)
+                        .map(state -> doArt(entity, state, SlashArts.ArtsType.Super))
+                        .orElse(new Art(false, "", "the slash blade has no blade state"));
+            }
+            artsType = entity.getRandom().nextBoolean() ? SlashArts.ArtsType.Jackpot : SlashArts.ArtsType.Success;
+        } else if ("just".equals(t)) {
+            artsType = SlashArts.ArtsType.Jackpot;
+        } else {
+            artsType = SlashArts.ArtsType.Success;
         }
-        boolean just = "just".equals(t) || ("random".equals(t) && entity.getRandom().nextBoolean());
         return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
-            return doArt(entity, state, just ? SlashArts.ArtsType.Jackpot : SlashArts.ArtsType.Success);
+            return doArt(entity, state, artsType);
         }).orElse(new Art(false, "", "the slash blade has no blade state"));
     }
 
     /**
-     * 放一次剑技——照车万女仆 {@code doSlashArts}:doArts 按当前刀的 SA 取 combo → post PerformSlashArtEvent
-     * → updateComboSeq 切过去。不管这把刀的 SA 来自哪个模组,doArts 都自动选对。
+     * 放一次剑技:doArts 按当前刀的 SA 取 combo(不管来自哪个模组)→ updateComboSeq 切过去 = 放这把刀自己的 SA。
+     * 1.1.23 没有 PerformSlashArtEvent 事件钩子(那是 1.21.x 加的),所以这里 doArts 后直接切。
      */
     private static Art doArt(LivingEntity entity, ISlashBladeState state, SlashArts.ArtsType artsType) {
         if (state.isBroken()) {
@@ -169,15 +181,7 @@ public final class SlashBlade {
         if (!SwordType.from(entity.getMainHandItem()).contains(SwordType.ENCHANTED)) {
             return new Art(false, artOf(state), "this blade is not enchanted; it has no slash art yet");
         }
-        int elapsed = artsType == SlashArts.ArtsType.Jackpot ? 10 : 20;
         ResourceLocation comboLoc = state.getSlashArts().doArts(artsType, entity);
-        SlashBladeEvent.PerformSlashArtEvent event =
-                new SlashBladeEvent.PerformSlashArtEvent(entity, elapsed, state, comboLoc, artsType);
-        MinecraftForge.EVENT_BUS.post(event);
-        if (event.isCanceled()) {
-            return new Art(false, artOf(state), "the slash art was cancelled");
-        }
-        comboLoc = event.getComboState();
         ComboState combo = ComboStateRegistry.REGISTRY.get().getValue(comboLoc);
         if (combo == null || Objects.equals(comboLoc, ComboStateRegistry.NONE.getId())) {
             return new Art(false, artOf(state), "this blade's slash art is not supported");
@@ -185,22 +189,6 @@ public final class SlashBlade {
         state.updateComboSeq(entity, comboLoc);
         entity.swing(InteractionHand.MAIN_HAND);
         return new Art(true, artOf(state), "");
-    }
-
-    /**
-     * 放一次终极 SA(超级变式):也走 {@code doArts(Super)} 按当前刀的 SA 取超级变式,而非硬编码次元斩。
-     * 需要妖+锐利边缘+满耐久+地面。注意:原版「超级变式默认与次元斩相同」,所以普通刀放出的超级就是
-     * 超级次元斩;而某些第三方 SA 会定义自己的超级变式。
-     */
-    private static Art superArt(LivingEntity entity, ItemStack blade) {
-        if (!canSuper(blade, entity)) {
-            return new Art(false, artKey(blade),
-                    "the blade needs to be bewitched (enchanted + named), fierce-edged (1000+ kills), "
-                            + "unbroken, unsealed, at full durability, and on the ground");
-        }
-        return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
-            return doArt(entity, state, SlashArts.ArtsType.Super);
-        }).orElse(new Art(false, "", "the slash blade has no blade state"));
     }
 
     /** 放一次超SA 的别名——= 终极 SA(超级变式,按当前刀)。 */
