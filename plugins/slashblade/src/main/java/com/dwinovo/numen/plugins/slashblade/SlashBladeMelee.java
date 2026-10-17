@@ -3,6 +3,7 @@ package com.dwinovo.numen.plugins.slashblade;
 import com.dwinovo.numen.api.combat.MeleeStyle;
 import com.dwinovo.numen.entity.InputDriver;
 import com.dwinovo.numen.entity.NumenPlayer;
+import net.minecraft.commands.arguments.EntityAnchorArgument;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
@@ -10,21 +11,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 主手是拔刀剑时接管近战挥击。优先级:
+ * 主手是拔刀剑时接管近战挥击,照车万女仆「真正的力量」{@code SimpleSlashGoal} 的<b>连段流</b>:
  * <ol>
- *   <li><b>能放超SA 就放超SA</b>,否则放<b>普通 SA</b>({@code art("auto")} 替她决定,不去硬判);</li>
- *   <li><b>SA 都放不出</b>(断刀/封印/未附魔/无 SA)才退回原版平A。</li>
+ *   <li>先 {@code trySlashArts}:当前连段处于「蓄力段/高级蓄力段/快速蓄力段」时,放一次 SA(评价 S 时放超SA);</li>
+ *   <li>否则 {@code normalSlashBladeAttack}:普通连段推进(COMBO_A/B/C)、疾走居合、挑空、空中技都在这里自然出现;</li>
+ *   <li>放 SA 前补锁定目标 + 拉满评价。</li>
  * </ol>
  *
- * <p>冷却只做节流,不让每 tick 狂放剑技烧资源;关键变化是<b>评分没到 3S 之前也放普通 SA</b>,而不是死等超SA
- * 才动手、平挥空耗。
+ * <p>这是车万女仆能「多种招式都能放」的真相:普通剑技是连段本身,SA 是连段走到蓄力段时额外放的大招,
+ * 超SA 是评价 S 时在高级蓄力段放。不是「点名调什么招式」,而是「连段自然推进 + 蓄力段判定放 SA」。
  */
 final class SlashBladeMelee implements MeleeStyle {
 
     private static final Logger LOG = LoggerFactory.getLogger("numen-slashblade");
-
-    /** 两次剑技之间的最小间隔(tick)。20 tick = 1 秒。 */
-    private static final int ART_COOLDOWN_TICKS = 20;
 
     private int lastArtTick;
 
@@ -42,17 +41,13 @@ final class SlashBladeMelee implements MeleeStyle {
         InputDriver.lookAt(fighter, target.getEyePosition());
         fighter.setSprinting(false);
 
-        if (fighter.tickCount - lastArtTick >= ART_COOLDOWN_TICKS) {
-            lastArtTick = fighter.tickCount;
-            // auto:够放超SA 就放超SA,否则放普通 SA;两者都放不出才落到平A。
-            SlashBlade.Art done = SlashBlade.art(fighter, blade, "auto", target);
-            if (done.executed()) {
-                LOG.info("拔刀剑剑技:{} 释放了 {} (目标={})", fighter.getName().getString(), done.sa(), target.getId());
-                return true;
-            }
+        // 连段流:先试 SA(蓄力段才放),否则走普通连段推进。
+        boolean swung = SlashBlade.slashBladeFlow(fighter, blade, target);
+        if (swung) {
+            return true;
         }
 
-        // 冷却中 / 放不出:原版平A(主手拔刀剑 → ItemSlashBlade.hurtEnemy → 刀光+伤害)
+        // 兜底:普通连段也推不动(极少),走原版平A。
         fighter.attack(target);
         fighter.swing(InteractionHand.MAIN_HAND);
         return true;
