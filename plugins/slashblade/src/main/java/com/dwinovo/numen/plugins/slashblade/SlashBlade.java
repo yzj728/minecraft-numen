@@ -26,22 +26,18 @@ import java.util.Objects;
 /**
  * 本插件对接拔刀剑(SlashBlade:Resharped)的那一面——<b>唯一</b>知道拔刀剑类型的地方。
  *
- * <h2>核心:用拔刀剑原生 {@code doArts} 按「刀当前附的 SA」放招,不硬编码 SA 映射</h2>
- * 每把刀的 SA 是它自己的属性(原版 {@code slashblade:*}、以及 star_fantasy / slashblade_addon / murasame 等
- * 第三方注册的 {@code xxx:*} 都算)。放剑技的正确做法是:
+ * <h2>核心:用拔刀剑原生 {@code doArts} 按「刀当前附的 SA」放招</h2>
+ * 所有 SA(原版 / star_fantasy / slashblade_addon / murasame)都是统一接口:
  * <pre>
- *   ResourceLocation combo = state.getSlashArts().doArts(type, entity);   // 自动按这刀的 SA 取 combo
- *   state.updateComboSeq(entity, combo);                                  // 切过去 = 放这一招
+ *   state.getSlashArts().doArts(type, entity) → combo key → state.updateComboSeq(entity, combo)
  * </pre>
- * {@code getSlashArts()} 返回的就是<b>这把刀当前附的那个 SlashArts 对象</b>,{@code doArts} 会<b>自动</b>返回它
- * 对应变式的正确 combo——所以后台程序<b>不需要知道「这刀是什么 SA」</b>,也不需要硬编码一张「SA → 接口」的表。
+ * 后台不需要知道「这刀是什么 SA」,也不硬编码映射。
  *
- * <p>上一版错在硬编码了一张只含原版 SA 短名的表,查不到自定义 SA 就「兜底退回次元斩」——于是拿什么刀都放
- * 次元斩。现在去掉那张表和兜底,交给 {@code doArts} 自动选对。
- *
- * <h2>后续段由 ticker 逐刻驱动</h2>
- * {@code updateComboSeq} 只触发进场 {@code clickAction};判断斩这类 SA 的多段特效在 {@code tickAction} 里,真玩家靠
- * {@code inventoryTick} 逐刻驱动,假玩家没有那条链,由 {@link SlashBladeTicker} 补上(每刻调 {@link #tickAction})。
+ * <h2>释放前置:锁定目标(关键)</h2>
+ * 很多 SA(后撤飞剑 / 聚怪次元炸 / 召唤机器人戳 / 次元斩)的触发前提是「刀有一个<b>已锁定目标</b>」
+ * ({@code state.setTargetEntityId})。真人靠「潜行键」锁定,假玩家没有那个动作,所以之前这些 SA 放不出,
+ * 而「多道剑气 / 范围次元斩绝」这类不依赖锁定的就能放——这正好解释了「三把里只有一把能放」。
+ * 这里放招前先 {@code state.setTargetEntityId(target)} 补上锁定。
  */
 public final class SlashBlade {
 
@@ -109,7 +105,7 @@ public final class SlashBlade {
                 .orElseGet(List::of);
     }
 
-    /** 能不能放超级 SA:妖 + 锐利边缘 + 非断刀 + 非封印 + 满耐久 + 站地面(照 mcmod 官方判定)。 */
+    /** 能不能放超级 SA:妖 + 锐利边缘 + 非断刀 + 非封印 + 满耐久 + 站地面。 */
     private static boolean canSuper(ItemStack blade, LivingEntity entity) {
         if (!isSlashBlade(blade)) {
             return false;
@@ -130,7 +126,7 @@ public final class SlashBlade {
         return art(entity, blade, type, null);
     }
 
-    /** 放一次剑技,带目标——放之前面向目标。 */
+    /** 放一次剑技,带目标——放之前面向目标 + 锁定目标。 */
     public static Art art(LivingEntity entity, ItemStack blade, String type, Entity target) {
         if (!isSlashBlade(blade)) {
             return new Art(false, "", "no slash blade in your main hand");
@@ -146,14 +142,14 @@ public final class SlashBlade {
                                 + "unbroken, unsealed, at full durability, and on the ground");
             }
             return blade.getCapability(ItemSlashBlade.BLADESTATE)
-                    .map(state -> doArt(entity, state, SlashArts.ArtsType.Super))
+                    .map(state -> doArt(entity, state, SlashArts.ArtsType.Super, target))
                     .orElse(new Art(false, "", "the slash blade has no blade state"));
         }
         SlashArts.ArtsType artsType;
         if ("random".equals(t)) {
             if (canSuper(blade, entity) && entity.getRandom().nextBoolean()) {
                 return blade.getCapability(ItemSlashBlade.BLADESTATE)
-                        .map(state -> doArt(entity, state, SlashArts.ArtsType.Super))
+                        .map(state -> doArt(entity, state, SlashArts.ArtsType.Super, target))
                         .orElse(new Art(false, "", "the slash blade has no blade state"));
             }
             artsType = entity.getRandom().nextBoolean() ? SlashArts.ArtsType.Jackpot : SlashArts.ArtsType.Success;
@@ -163,15 +159,15 @@ public final class SlashBlade {
             artsType = SlashArts.ArtsType.Success;
         }
         return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
-            return doArt(entity, state, artsType);
+            return doArt(entity, state, artsType, target);
         }).orElse(new Art(false, "", "the slash blade has no blade state"));
     }
 
     /**
-     * 放一次剑技:doArts 按当前刀的 SA 取 combo(不管来自哪个模组)→ updateComboSeq 切过去 = 放这把刀自己的 SA。
-     * 1.1.23 没有 PerformSlashArtEvent 事件钩子(那是 1.21.x 加的),所以这里 doArts 后直接切。
+     * 放一次剑技:先给刀设置锁定目标(很多 SA 的前置),再 doArts 取 combo → updateComboSeq 切过去。
+     * 1.1.23 没有 PerformSlashArtEvent 事件钩子,所以 doArts 后直接切。
      */
-    private static Art doArt(LivingEntity entity, ISlashBladeState state, SlashArts.ArtsType artsType) {
+    private static Art doArt(LivingEntity entity, ISlashBladeState state, SlashArts.ArtsType artsType, Entity target) {
         if (state.isBroken()) {
             return new Art(false, artOf(state), "the blade is broken; repair it first");
         }
@@ -180,6 +176,10 @@ public final class SlashBlade {
         }
         if (!SwordType.from(entity.getMainHandItem()).contains(SwordType.ENCHANTED)) {
             return new Art(false, artOf(state), "this blade is not enchanted; it has no slash art yet");
+        }
+        // 锁定目标:很多 SA(后撤飞剑/聚怪次元炸/召唤物戳)的触发前提,假玩家不会按潜行锁定,这里手动设。
+        if (target != null) {
+            state.setTargetEntityId(target.getId());
         }
         ResourceLocation comboLoc = state.getSlashArts().doArts(artsType, entity);
         ComboState combo = ComboStateRegistry.REGISTRY.get().getValue(comboLoc);
