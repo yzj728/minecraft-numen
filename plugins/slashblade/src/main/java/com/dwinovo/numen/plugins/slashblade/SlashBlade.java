@@ -14,6 +14,7 @@ import net.minecraft.util.RandomSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
@@ -36,9 +37,8 @@ import java.util.Objects;
  *
  * <h2>释放前置:锁定目标(关键)</h2>
  * 很多 SA(后撤飞剑 / 聚怪次元炸 / 召唤机器人戳 / 次元斩)的触发前提是「刀有一个<b>已锁定目标</b>」
- * ({@code state.setTargetEntityId})。真人靠「潜行键」锁定,假玩家没有那个动作,所以之前这些 SA 放不出,
- * 而「多道剑气 / 范围次元斩绝」这类不依赖锁定的就能放——这解释了「三把里只有一把能放」。
- * 这里放招前先 {@code state.setTargetEntityId(target)} 补上锁定;没显式给目标时用 {@link #nearestTarget} 自动找。
+ * ({@code state.setTargetEntityId})。真人靠「潜行键」锁定,假玩家没有那个动作,所以放招前先锁定。
+ * 没显式给目标时,{@link #nearestTarget} 自动找「够得着、看得见」的最近敌对生物,避免空挥。
  */
 public final class SlashBlade {
 
@@ -123,17 +123,25 @@ public final class SlashBlade {
     }
 
     /**
-     * 附近最近的敌对生物(16 格内),作为 SA 的锁定目标。假玩家不会按潜行锁定,放招前用这个补一个目标。
-     * 找不到返回 null。
+     * 附近最近的「够得着、看得见」的敌对生物,作为 SA 的锁定目标。假玩家不会按潜行锁定,放招前用这个补目标。
+     * 找不到返回 null——宁可空(不空挥),也不锁一个打不到的。
      */
     public static LivingEntity nearestTarget(LivingEntity entity) {
         LivingEntity best = null;
         double bestDist = Double.MAX_VALUE;
-        for (LivingEntity other : entity.level()
-                .getEntitiesOfClass(LivingEntity.class, entity.getBoundingBox().inflate(16.0, 8.0, 16.0),
-                        e -> e != entity && e.isAlive() && !e.isSpectator() && (e instanceof Enemy || e.getLastHurtByMob() == entity
-                                || (e instanceof net.minecraft.world.entity.Mob mob && mob.getTarget() == entity)))) {
+        double reach = 8.0;   // SA 的作用范围(后撤飞剑/次元斩都能到这一圈)
+        for (LivingEntity other : entity.level().getEntitiesOfClass(LivingEntity.class,
+                entity.getBoundingBox().inflate(reach), this::wantsToFight)) {
+            if (other == entity || !other.isAlive() || other.isSpectator()) {
+                continue;
+            }
             double d = entity.distanceToSqr(other);
+            if (d > reach * reach) {
+                continue;   // 太远了够不着,别空挥
+            }
+            if (!entity.hasLineOfSight(other)) {
+                continue;   // 隔着墙看不见,别空挥
+            }
             if (d < bestDist) {
                 best = other;
                 bestDist = d;
@@ -142,7 +150,12 @@ public final class SlashBlade {
         return best;
     }
 
-    /** 放一次剑技(SA)。{@code type} = normal/just/super/random。不带目标时自动找最近的敌对生物。 */
+    /** 这个目标值不值得打:敌对怪物,或者在打她/她刚打过。 */
+    private static boolean wantsToFight(LivingEntity e) {
+        return e instanceof Enemy || e.getLastHurtByMob() == null;
+    }
+
+    /** 放一次剑技(SA)。{@code type} = normal/just/super/random。不带目标时自动找最近敌对生物。 */
     public static Art art(LivingEntity entity, ItemStack blade, String type) {
         return art(entity, blade, type, nearestTarget(entity));
     }
