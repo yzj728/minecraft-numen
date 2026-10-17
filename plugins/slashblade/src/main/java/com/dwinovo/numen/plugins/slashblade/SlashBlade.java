@@ -1,13 +1,12 @@
 package com.dwinovo.numen.plugins.slashblade;
 
 import mods.flammpfeil.slashblade.capability.slashblade.ISlashBladeState;
+import mods.flammpfeil.slashblade.event.SlashBladeEvent;
 import mods.flammpfeil.slashblade.item.ItemSlashBlade;
 import mods.flammpfeil.slashblade.item.SwordType;
-import mods.flammpfeil.slashblade.slasharts.CircleSlash;
-import mods.flammpfeil.slashblade.slasharts.Drive;
-import mods.flammpfeil.slashblade.slasharts.JudgementCut;
-import mods.flammpfeil.slashblade.slasharts.SakuraEnd;
-import mods.flammpfeil.slashblade.slasharts.WaveEdge;
+import mods.flammpfeil.slashblade.registry.ComboStateRegistry;
+import mods.flammpfeil.slashblade.registry.combo.ComboState;
+import mods.flammpfeil.slashblade.slasharts.SlashArts;
 import mods.flammpfeil.slashblade.util.AttackManager;
 import mods.flammpfeil.slashblade.util.KnockBacks;
 import net.minecraft.commands.arguments.EntityAnchorArgument;
@@ -18,25 +17,35 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.Vec3;
+import net.minecraftforge.common.MinecraftForge;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.function.BiConsumer;
+import java.util.Objects;
 
 /**
  * 本插件对接拔刀剑(SlashBlade:Resharped)的那一面——<b>唯一</b>知道拔刀剑类型的地方。
  *
- * <h2>核心:直接调用各 SA 的 helper 生成特效实体,不碰 ComboState 状态机</h2>
- * 平 A / 快速连斩在假玩家身上<b>有刀光、有伤害</b>——那走 {@link AttackManager#doSlash}(生成 {@code EntitySlashEffect})。
- * 这条口子在假玩家身上已验证可用。而「切 ComboState 靠 ticker 逐刻推」这条链在假玩家身上断裂。
+ * <h2>核心:用拔刀剑原生 {@code doArts} 按「刀当前附的 SA」放招,不硬编码 SA 映射</h2>
+ * 每把刀的 SA 是它自己的属性(原版 {@code slashblade:*}、以及 star_fantasy / slashblade_addon / murasame 等
+ * 第三方注册的 {@code xxx:*} 都算)。放剑技的正确做法是:
+ * <pre>
+ *   ResourceLocation combo = state.getSlashArts().doArts(type, entity);   // 自动按这刀的 SA 取 combo
+ *   post PerformSlashArtEvent;                                            // 拔刀剑释放剑技的事件钩子
+ *   state.updateComboSeq(entity, combo);                                  // 切过去 = 放这一招
+ * </pre>
+ * {@code getSlashArts()} 返回的就是<b>这把刀当前附的那个 SlashArts 对象</b>,{@code doArts} 会<b>自动</b>返回它
+ * 对应变式的正确 combo——所以后台程序<b>不需要知道「这刀是什么 SA」</b>,也不需要硬编码一张「SA → 接口」的表。
+ * 这是车万女仆「真正的力量」{@code SlashBladeAttackUtils.doSlashArts} 的原样口径。
  *
- * <h2>终极 SA(超级次元斩)怎么直接放</h2>
- * 照车万女仆「真正的力量」与 mcmod 官方判定:超级 SA = 判断斩的「超级」变式,效果是「以使用者为心、±X/±Y/±Z 各拓 48 格,
- * 范围内所有可锁定目标处召唤次元斩实体 + 2 秒缓慢 XI」。它对应的 combo 是 {@code JUDGEMENT_CUT_END},其 {@code tickAction}
- * 第 0 刻调的就是 {@link JudgementCut#doJudgementCutSuper}——所以<b>这个 helper 就是「终极 SA」的直接入口</b>,直接调它即可,
- * 不经过状态机、不经过蓄力。普通次元斩({@link JudgementCut#doJudgementCut})就是「后退 0.9 格 + 球状次元斩」= 你要的「后撤投光剑」。
+ * <p>上一版错在硬编码了一张只含原版 SA 短名的表,查不到自定义 SA 就「兜底退回次元斩」——于是拿什么刀都放
+ * 次元斩。现在去掉那张表和兜底,交给 {@code doArts} 自动选对。
+ *
+ * <h2>后续段由 ticker 逐刻驱动</h2>
+ * {@code updateComboSeq} 只触发进场 {@code clickAction};判断斩这类 SA 的多段特效在 {@code tickAction} 里,真玩家靠
+ * {@code inventoryTick} 逐刻驱动,假玩家没有那条链,由 {@link SlashBladeTicker} 补上(每刻调 {@link #tickAction})。
  */
 public final class SlashBlade {
 
@@ -120,42 +129,6 @@ public final class SlashBlade {
                 .orElse(false);
     }
 
-    /**
-     * 各 SA 短名 → 放招动作(照各 SA 的 helper 直调,生成特效实体)。
-     * 判断斩:normal=后退+球状次元斩(doJudgementCut),just=完美(doJudgementCutJust,不位移+额外斩击+挑飞)。
-     */
-    private static final java.util.Map<String, BiConsumer<LivingEntity, Boolean>> ARTS = java.util.Map.ofEntries(
-            java.util.Map.entry("judgement_cut", (BiConsumer<LivingEntity, Boolean>) (u, just) -> {
-                if (just) {
-                    JudgementCut.doJudgementCutJust(u);
-                } else {
-                    JudgementCut.doJudgementCut(u);
-                }
-            }),
-            java.util.Map.entry("sakura_end", (BiConsumer<LivingEntity, Boolean>) (u, just) -> {
-                SakuraEnd.doSlash(u, 22.5F, Vec3.ZERO, false, false, 1.2);
-                SakuraEnd.doSlash(u, 180F - 22.5F, Vec3.ZERO, false, true, 1.5);
-            }),
-            java.util.Map.entry("void_slash", (BiConsumer<LivingEntity, Boolean>) (u, just) ->
-                    AttackManager.doVoidSlashAttack(u)),
-            java.util.Map.entry("circle_slash", (BiConsumer<LivingEntity, Boolean>) (u, just) -> {
-                CircleSlash.doCircleSlashAttack(u, 180);
-                CircleSlash.doCircleSlashAttack(u, 90);
-                CircleSlash.doCircleSlashAttack(u, 0);
-                CircleSlash.doCircleSlashAttack(u, -90);
-            }),
-            java.util.Map.entry("drive_vertical", (BiConsumer<LivingEntity, Boolean>) (u, just) ->
-                    Drive.doSlash(u, -90F, 10, Vec3.ZERO, false, 7, 2f)),
-            java.util.Map.entry("drive_horizontal", (BiConsumer<LivingEntity, Boolean>) (u, just) ->
-                    Drive.doSlash(u, 0F, 10, Vec3.ZERO, false, 7, 2f)),
-            java.util.Map.entry("wave_edge", (BiConsumer<LivingEntity, Boolean>) (u, just) ->
-                    WaveEdge.doSlash(u, 90F, 20, Vec3.ZERO, false, 7, 0.2f, 1f, 4)),
-            java.util.Map.entry("piercing", (BiConsumer<LivingEntity, Boolean>) (u, just) -> {
-                // piercing 没有独立 helper,用前冲 + 连续刀光模拟
-                AttackManager.doSlash(u, -30F, Vec3.ZERO, false, false, 1.1f, KnockBacks.toss);
-                AttackManager.doSlash(u, 30F, Vec3.ZERO, false, true, 1.1f, KnockBacks.toss);
-            }));
-
     /** 放一次剑技(SA)。{@code type} = normal/just/super/random。 */
     public static Art art(LivingEntity entity, ItemStack blade, String type) {
         return art(entity, blade, type, null);
@@ -171,51 +144,66 @@ public final class SlashBlade {
         }
         String t = type == null ? "random" : type.toLowerCase(Locale.ROOT);
         if ("super".equals(t)) {
-            return superArtImpl(entity, blade);
+            return superArt(entity, blade);
         }
         if ("random".equals(t) && canSuper(blade, entity) && entity.getRandom().nextBoolean()) {
-            return superArtImpl(entity, blade);
+            return superArt(entity, blade);
         }
-        boolean just = "just".equals(t)
-                || ("random".equals(t) && entity.getRandom().nextBoolean());
-        // 断刀/封印先查
-        if (blade.getCapability(ItemSlashBlade.BLADESTATE).map(ISlashBladeState::isBroken).orElse(false)) {
-            return new Art(false, artKey(blade), "the blade is broken; repair it first");
-        }
-        if (blade.getCapability(ItemSlashBlade.BLADESTATE).map(ISlashBladeState::isSealed).orElse(false)) {
-            return new Art(false, artKey(blade), "the blade is sealed");
-        }
+        boolean just = "just".equals(t) || ("random".equals(t) && entity.getRandom().nextBoolean());
         return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
-            ResourceLocation key = state.getSlashArtsKey();
-            String shortName = key == null ? "judgement_cut" : key.getPath();
-            BiConsumer<LivingEntity, Boolean> action = ARTS.get(shortName);
-            if (action == null) {
-                // 未知 SA:退回普通次元斩
-                JudgementCut.doJudgementCut(entity);
-            } else {
-                action.accept(entity, just);
-            }
-            entity.swing(InteractionHand.MAIN_HAND);
-            return new Art(true, artKey(blade), "");
+            return doArt(entity, state, just ? SlashArts.ArtsType.Jackpot : SlashArts.ArtsType.Success);
         }).orElse(new Art(false, "", "the slash blade has no blade state"));
     }
 
     /**
-     * 放一次终极 SA(超级次元斩):直接调 {@link JudgementCut#doJudgementCutSuper} =「48 格全目标锁定召唤次元斩 + 缓慢 XI」。
-     * 需要妖+锐利边缘+满耐久+地面(照官方判定),这不耗一半耐久(那是 ComboState 的 releaseSSA 才做的,这里直调 helper 不改耐久)。
+     * 放一次剑技——照车万女仆 {@code doSlashArts}:doArts 按当前刀的 SA 取 combo → post PerformSlashArtEvent
+     * → updateComboSeq 切过去。不管这把刀的 SA 来自哪个模组,doArts 都自动选对。
      */
-    private static Art superArtImpl(LivingEntity entity, ItemStack blade) {
+    private static Art doArt(LivingEntity entity, ISlashBladeState state, SlashArts.ArtsType artsType) {
+        if (state.isBroken()) {
+            return new Art(false, artOf(state), "the blade is broken; repair it first");
+        }
+        if (state.isSealed()) {
+            return new Art(false, artOf(state), "the blade is sealed");
+        }
+        if (!SwordType.from(entity.getMainHandItem()).contains(SwordType.ENCHANTED)) {
+            return new Art(false, artOf(state), "this blade is not enchanted; it has no slash art yet");
+        }
+        int elapsed = artsType == SlashArts.ArtsType.Jackpot ? 10 : 20;
+        ResourceLocation comboLoc = state.getSlashArts().doArts(artsType, entity);
+        SlashBladeEvent.PerformSlashArtEvent event =
+                new SlashBladeEvent.PerformSlashArtEvent(entity, elapsed, state, comboLoc, artsType);
+        MinecraftForge.EVENT_BUS.post(event);
+        if (event.isCanceled()) {
+            return new Art(false, artOf(state), "the slash art was cancelled");
+        }
+        comboLoc = event.getComboState();
+        ComboState combo = ComboStateRegistry.REGISTRY.get().getValue(comboLoc);
+        if (combo == null || Objects.equals(comboLoc, ComboStateRegistry.NONE.getId())) {
+            return new Art(false, artOf(state), "this blade's slash art is not supported");
+        }
+        state.updateComboSeq(entity, comboLoc);
+        entity.swing(InteractionHand.MAIN_HAND);
+        return new Art(true, artOf(state), "");
+    }
+
+    /**
+     * 放一次终极 SA(超级变式):也走 {@code doArts(Super)} 按当前刀的 SA 取超级变式,而非硬编码次元斩。
+     * 需要妖+锐利边缘+满耐久+地面。注意:原版「超级变式默认与次元斩相同」,所以普通刀放出的超级就是
+     * 超级次元斩;而某些第三方 SA 会定义自己的超级变式。
+     */
+    private static Art superArt(LivingEntity entity, ItemStack blade) {
         if (!canSuper(blade, entity)) {
             return new Art(false, artKey(blade),
                     "the blade needs to be bewitched (enchanted + named), fierce-edged (1000+ kills), "
                             + "unbroken, unsealed, at full durability, and on the ground");
         }
-        JudgementCut.doJudgementCutSuper(entity);
-        entity.swing(InteractionHand.MAIN_HAND);
-        return new Art(true, artKey(blade), "");
+        return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
+            return doArt(entity, state, SlashArts.ArtsType.Super);
+        }).orElse(new Art(false, "", "the slash blade has no blade state"));
     }
 
-    /** 放一次超SA 的别名——= 终极 SA(超级次元斩)。 */
+    /** 放一次超SA 的别名——= 终极 SA(超级变式,按当前刀)。 */
     public static Action superArt(LivingEntity entity, ItemStack blade) {
         SlashBlade.Art done = art(entity, blade, "super");
         return new Action(done.executed(), done.reason());
@@ -245,10 +233,9 @@ public final class SlashBlade {
         return new Action(true, "");
     }
 
-    /** 疾走居合:瞬移式前冲(朝面朝方向)+ 连续多段刀光——瞬移能顶过假玩家的寻路物理,冲刺肉眼可见。 */
+    /** 疾走居合:瞬移式前冲(朝面朝方向)+ 连续多段刀光。 */
     private static void releaseRapidSlash(LivingEntity entity) {
         Vec3 look = entity.getLookAngle();
-        // 朝面朝方向前冲 3 格(瞬移,不是设速度——假玩家的水平速度会被寻路模块覆盖)
         Vec3 target = entity.position().add(look.x * 3.0, 0, look.z * 3.0);
         entity.teleportTo(target.x, entity.getY(), target.z);
         entity.setDeltaMovement(look.x * 1.2, entity.getDeltaMovement().y, look.z * 1.2);
@@ -298,5 +285,34 @@ public final class SlashBlade {
         }
         entity.swing(InteractionHand.MAIN_HAND);
         return new Action(true, "");
+    }
+
+    /**
+     * 逐 tick 推进刀当前的 combo 时间线——复现 {@code ItemSlashBlade.inventoryTick} 里 {@code cs.tickAction(living)}
+     * 那一段,让判断斩这类「tickAction 型」SA 的多段特效能被假玩家放出。由 {@link SlashBladeTicker} 每服务端刻调用。
+     */
+    public static void tickAction(LivingEntity entity) {
+        ItemStack blade = entity.getMainHandItem();
+        if (!isSlashBlade(blade)) {
+            return;
+        }
+        blade.getCapability(ItemSlashBlade.BLADESTATE).ifPresent(state -> {
+            ResourceLocation loc = state.resolvCurrentComboState(entity);
+            ComboState cs = ComboStateRegistry.REGISTRY.get().getValue(loc);
+            if (cs == null) {
+                cs = ComboStateRegistry.NONE.get();
+            }
+            if (cs != null) {
+                cs.tickAction(entity);
+            } else if (!loc.equals(state.getComboRoot())) {
+                state.setComboSeq(state.getComboRoot());
+            }
+        });
+    }
+
+    /** 这把刀实际的剑技 key(完整注册名)。 */
+    private static String artOf(ISlashBladeState state) {
+        ResourceLocation key = state.getSlashArtsKey();
+        return key == null ? "slashblade:judgement_cut" : key.toString();
     }
 }
