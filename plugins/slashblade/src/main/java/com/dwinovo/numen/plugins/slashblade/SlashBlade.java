@@ -38,9 +38,7 @@ import java.util.Objects;
  *
  * <h2>释放前置:锁定目标 + 评价等级(两个都关键)</h2>
  * 「锁定目标」:很多 SA(后撤飞剑/聚怪次元炸/召唤物戳/次元斩)需要刀有<b>已锁定目标</b>,假玩家不按潜行,放招前补。
- * 「评价等级(Concentration Rank)」:拔刀剑的 SA 释放与伤害依赖评价等级。假玩家「死亡→复活」是
- * 删旧实体、重建新实体({@code Companions.onDeath → despawn → respawnDead → spawn}),新实体的评价 capability
- * 归零(NONE),于是 SA 放不出;而 {@code doSlash} 直调的其它剑技不依赖评价,所以还能放。放招前把评价顶满 SSS。
+ * 「评价等级」:拔刀剑的 SA 释放与伤害依赖评价,假玩家死亡重生换新实体后评价归零,放招前顶满 SSS。
  */
 public final class SlashBlade {
 
@@ -124,10 +122,7 @@ public final class SlashBlade {
                 .orElse(false);
     }
 
-    /**
-     * 把假玩家的评价等级顶满 SSS(1800)——假玩家死亡重生换了新实体,评价归零 NONE,
-     * 而 SA 释放/伤害依赖评价,所以死后放不出 SA。这里放招前强制拉满。
-     */
+    /** 把假玩家的评价等级顶满 SSS(1800)——死亡重生换新实体评价归零,放招前置拉满。 */
     private static void fullRank(LivingEntity entity) {
         entity.getCapability(CapabilityConcentrationRank.RANK_POINT).ifPresent(rank -> {
             rank.setRawRankPoint(1800);
@@ -135,9 +130,7 @@ public final class SlashBlade {
         });
     }
 
-    /**
-     * 附近最近的「够得着、看得见」的敌对生物,作为 SA 的锁定目标。找不到返回 null(宁可空,不空挥)。
-     */
+    /** 附近最近的「够得着、看得见」的敌对生物。找不到返回 null(宁可空,不空挥)。 */
     public static LivingEntity nearestTarget(LivingEntity entity) {
         LivingEntity best = null;
         double bestDist = Double.MAX_VALUE;
@@ -168,7 +161,7 @@ public final class SlashBlade {
         return best;
     }
 
-    /** 放一次剑技(SA)。{@code type} = normal/just/super/random。不带目标时自动找最近敌对生物。 */
+    /** 放一次剑技(SA)。{@code type} = normal/just/super/auto/random。不带目标时自动找最近敌对生物。 */
     public static Art art(LivingEntity entity, ItemStack blade, String type) {
         return art(entity, blade, type, nearestTarget(entity));
     }
@@ -181,7 +174,16 @@ public final class SlashBlade {
         if (target != null) {
             entity.lookAt(EntityAnchorArgument.Anchor.FEET, target.position());
         }
-        String t = type == null ? "random" : type.toLowerCase(Locale.ROOT);
+        String t = type == null ? "auto" : type.toLowerCase(Locale.ROOT);
+
+        // auto:够放超SA 就放超SA,否则放普通 SA。这是「评分到 3S 放超SA、没到就放普通 SA」的精确语义。
+        if ("auto".equals(t)) {
+            SlashArts.ArtsType arts = canSuper(blade, entity) ? SlashArts.ArtsType.Super : SlashArts.ArtsType.Success;
+            return blade.getCapability(ItemSlashBlade.BLADESTATE)
+                    .map(state -> doArt(entity, state, arts, target))
+                    .orElse(new Art(false, "", "the slash blade has no blade state"));
+        }
+
         if ("super".equals(t)) {
             if (!canSuper(blade, entity)) {
                 return new Art(false, artKey(blade),
@@ -227,7 +229,7 @@ public final class SlashBlade {
         if (target != null) {
             state.setTargetEntityId(target.getId());
         }
-        // 前置二:拉满评价(假玩家死亡重生后评价归零,SA 依赖评价,放不出就是它)。
+        // 前置二:拉满评价。
         fullRank(entity);
         ResourceLocation comboLoc = state.getSlashArts().doArts(artsType, entity);
         ComboState combo = ComboStateRegistry.REGISTRY.get().getValue(comboLoc);
@@ -324,8 +326,7 @@ public final class SlashBlade {
     }
 
     /**
-     * 逐 tick 推进刀当前的 combo 时间线——复现 {@code ItemSlashBlade.inventoryTick} 里 {@code cs.tickAction(living)}
-     * 那一段,让判断斩这类「tickAction 型」SA 的多段特效能被假玩家放出。由 {@link SlashBladeTicker} 每服务端刻调用。
+     * 逐 tick 推进刀当前的 combo 时间线,让判断斩这类「tickAction 型」SA 的多段特效能被假玩家放出。
      */
     public static void tickAction(LivingEntity entity) {
         ItemStack blade = entity.getMainHandItem();
