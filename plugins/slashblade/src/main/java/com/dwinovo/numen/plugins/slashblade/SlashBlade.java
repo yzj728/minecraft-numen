@@ -1,5 +1,6 @@
 package com.dwinovo.numen.plugins.slashblade;
 
+import mods.flammpfeil.slashblade.capability.concentrationrank.CapabilityConcentrationRank;
 import mods.flammpfeil.slashblade.capability.slashblade.ISlashBladeState;
 import mods.flammpfeil.slashblade.item.ItemSlashBlade;
 import mods.flammpfeil.slashblade.item.SwordType;
@@ -35,10 +36,11 @@ import java.util.Objects;
  * </pre>
  * 后台不需要知道「这刀是什么 SA」,也不硬编码映射。
  *
- * <h2>释放前置:锁定目标(关键)</h2>
- * 很多 SA(后撤飞剑 / 聚怪次元炸 / 召唤机器人戳 / 次元斩)的触发前提是「刀有一个<b>已锁定目标</b>」
- * ({@code state.setTargetEntityId})。真人靠「潜行键」锁定,假玩家没有那个动作,所以放招前先锁定。
- * 没显式给目标时,{@link #nearestTarget} 自动找「够得着、看得见」的最近敌对生物,避免空挥。
+ * <h2>释放前置:锁定目标 + 评价等级(两个都关键)</h2>
+ * 「锁定目标」:很多 SA(后撤飞剑/聚怪次元炸/召唤物戳/次元斩)需要刀有<b>已锁定目标</b>,假玩家不按潜行,放招前补。
+ * 「评价等级(Concentration Rank)」:拔刀剑的 SA 释放与伤害依赖评价等级。假玩家「死亡→复活」是
+ * 删旧实体、重建新实体({@code Companions.onDeath → despawn → respawnDead → spawn}),新实体的评价 capability
+ * 归零(NONE),于是 SA 放不出;而 {@code doSlash} 直调的其它剑技不依赖评价,所以还能放。放招前把评价顶满 SSS。
  */
 public final class SlashBlade {
 
@@ -123,24 +125,40 @@ public final class SlashBlade {
     }
 
     /**
-     * 附近最近的「够得着、看得见」的敌对生物,作为 SA 的锁定目标。假玩家不会按潜行锁定,放招前用这个补目标。
-     * 找不到返回 null——宁可空(不空挥),也不锁一个打不到的。
+     * 把假玩家的评价等级顶满 SSS(1800)——假玩家死亡重生换了新实体,评价归零 NONE,
+     * 而 SA 释放/伤害依赖评价,所以死后放不出 SA。这里放招前强制拉满。
+     */
+    private static void fullRank(LivingEntity entity) {
+        entity.getCapability(CapabilityConcentrationRank.RANK_POINT).ifPresent(rank -> {
+            rank.setRawRankPoint(1800);
+            rank.setLastUpdte(entity.level().getGameTime());
+        });
+    }
+
+    /**
+     * 附近最近的「够得着、看得见」的敌对生物,作为 SA 的锁定目标。找不到返回 null(宁可空,不空挥)。
      */
     public static LivingEntity nearestTarget(LivingEntity entity) {
         LivingEntity best = null;
         double bestDist = Double.MAX_VALUE;
-        double reach = 8.0;   // SA 的作用范围(后撤飞剑/次元斩都能到这一圈)
+        double reach = 8.0;
         for (LivingEntity other : entity.level().getEntitiesOfClass(LivingEntity.class,
-                entity.getBoundingBox().inflate(reach), this::wantsToFight)) {
+                entity.getBoundingBox().inflate(reach), e -> true)) {
             if (other == entity || !other.isAlive() || other.isSpectator()) {
+                continue;
+            }
+            boolean hostile = other instanceof Enemy
+                    || (other instanceof Mob mob && mob.getTarget() == entity)
+                    || other.getLastHurtByMob() == entity;
+            if (!hostile) {
                 continue;
             }
             double d = entity.distanceToSqr(other);
             if (d > reach * reach) {
-                continue;   // 太远了够不着,别空挥
+                continue;
             }
             if (!entity.hasLineOfSight(other)) {
-                continue;   // 隔着墙看不见,别空挥
+                continue;
             }
             if (d < bestDist) {
                 best = other;
@@ -150,17 +168,12 @@ public final class SlashBlade {
         return best;
     }
 
-    /** 这个目标值不值得打:敌对怪物,或者在打她/她刚打过。 */
-    private static boolean wantsToFight(LivingEntity e) {
-        return e instanceof Enemy || e.getLastHurtByMob() == null;
-    }
-
     /** 放一次剑技(SA)。{@code type} = normal/just/super/random。不带目标时自动找最近敌对生物。 */
     public static Art art(LivingEntity entity, ItemStack blade, String type) {
         return art(entity, blade, type, nearestTarget(entity));
     }
 
-    /** 放一次剑技,带目标——放之前面向目标 + 锁定目标。 */
+    /** 放一次剑技,带目标——放之前面向目标 + 锁定目标 + 拉满评价。 */
     public static Art art(LivingEntity entity, ItemStack blade, String type, Entity target) {
         if (!isSlashBlade(blade)) {
             return new Art(false, "", "no slash blade in your main hand");
@@ -198,7 +211,7 @@ public final class SlashBlade {
     }
 
     /**
-     * 放一次剑技:先给刀设置锁定目标(很多 SA 的前置),再 doArts 取 combo → updateComboSeq 切过去。
+     * 放一次剑技:先补锁定目标 + 拉满评价(两个前置),再 doArts 取 combo → updateComboSeq 切过去。
      */
     private static Art doArt(LivingEntity entity, ISlashBladeState state, SlashArts.ArtsType artsType, Entity target) {
         if (state.isBroken()) {
@@ -210,10 +223,12 @@ public final class SlashBlade {
         if (!SwordType.from(entity.getMainHandItem()).contains(SwordType.ENCHANTED)) {
             return new Art(false, artOf(state), "this blade is not enchanted; it has no slash art yet");
         }
-        // 锁定目标:很多 SA(后撤飞剑/聚怪次元炸/召唤物戳)的触发前提。
+        // 前置一:锁定目标(很多 SA 的触发前提)。
         if (target != null) {
             state.setTargetEntityId(target.getId());
         }
+        // 前置二:拉满评价(假玩家死亡重生后评价归零,SA 依赖评价,放不出就是它)。
+        fullRank(entity);
         ResourceLocation comboLoc = state.getSlashArts().doArts(artsType, entity);
         ComboState combo = ComboStateRegistry.REGISTRY.get().getValue(comboLoc);
         if (combo == null || Objects.equals(comboLoc, ComboStateRegistry.NONE.getId())) {
