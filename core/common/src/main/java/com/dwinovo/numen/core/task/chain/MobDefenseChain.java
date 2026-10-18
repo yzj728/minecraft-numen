@@ -36,12 +36,8 @@ import java.util.List;
  * 重派等于从头挖一遍。跟随也是一样:被打断打完,回来接着跟。
  *
  * <h2>什么算危险</h2>
- * 看的是<b>它已经进到多近</b>:进了<b>警戒半径</b>就算危险,当场接管——
- * 近战 {@link #MELEE_GUARD_RADIUS} 6 格,持远程武器(枪/弓/弩)时放宽到 {@link #RANGED_GUARD_RADIUS} 15 格。
- * 警戒只看「它进没进半径」,<b>不要求它已经锁定她</b>:一只敌对生物凑近就该打,等它先动手就晚了。
- *
- * <p><b>优先打最近的</b>:不是这条链挑,是 {@code attack} 自己的目标选择(挑最近的、选定后打完再换)。
- * 这条链只负责「进警戒半径 → 开一场无差别战斗」。
+ * 两条线,见 {@link #dangersNear}:<b>进警戒半径</b>(近战 {@link #MELEE_GUARD_RADIUS}、持远程 {@link #RANGED_GUARD_RADIUS}),
+ * 或<b>正在攻击她</b>(锁定她 / 刚打过她)——后者专治远程怪在警戒半径外放冷箭。两条都要求视线内、过权限。
  */
 public final class MobDefenseChain implements Task, Reflex {
 
@@ -57,12 +53,12 @@ public final class MobDefenseChain implements Task, Reflex {
      * <p>比原版近战危险半径(僵尸约 2~4 格)宽,是为了「先下手」——等它贴脸才反应就失去了
      * 近战该有的提前量。它不必已经锁定了她:靠近本身就是危险。
      */
-    private static final double MELEE_GUARD_RADIUS = 6.0;
+    private static final double MELEE_GUARD_RADIUS = 10.0;
 
     /**
-     * 持远程武器时的警戒半径:枪/弓/弩能打到十五格外,警戒就该那么远——看见就打,不等贴脸。
+     * 持远程武器时的警戒半径:枪/弓/弩能打到二十五格外,警戒就该那么远——看见就打,不等贴脸。
      */
-    private static final double RANGED_GUARD_RADIUS = 15.0;
+    private static final double RANGED_GUARD_RADIUS = 25.0;
 
     /**
      * 危险离开后还盯这么久才算真的没事。
@@ -187,24 +183,29 @@ public final class MobDefenseChain implements Task, Reflex {
     // ---- 什么算危险 ----
 
     /**
-     * 身边<b>进入警戒半径、且在视线内</b>的威胁。
+     * 身边需要迎击的威胁。<b>两条线,满足其一即危险</b>:
+     * <ol>
+     *   <li><b>进警戒半径</b>:离她 ≤ {@link #guardRadius}(近战 {10}、持远程 {25})——主动进攻,不要求它锁定她;</li>
+     *   <li><b>正在攻击她</b>:锁定了她({@code getTarget()==她})或刚打过她——远程怪在警戒半径外放冷箭也算,
+     *       她一还手,不被白嫖。</li>
+     * </ol>
      *
-     * <p><b>主动进攻</b>:只要敌对生物进了警戒半径(近战 {@link #MELEE_GUARD_RADIUS}、持远程 {@link #RANGED_GUARD_RADIUS})
-     * <b>且在她视线内</b>,就算危险,<b>不要求它已经锁定她</b>。防守不是挑衅——但一只敌对生物
-     * 凑到六格内,无论它冲谁来,都该先下手。打了它的那只由它自己记 {@code lastHurtByMob},不在这里拉仇恨。
+     * <p>两条线都要求<b>视线内</b>(隔着墙、卡洞里的是打不到的,当危险去追只会撞墙)和<b>过权限层</b>
+     * (有名字的敌对生物没主人点头不是能打的仗)。
      *
-     * <p><b>视线是硬门槛</b>:隔着墙、卡在洞里的是打不到的,当危险去追只会对着墙空转。
-     * 它没进视线时不算,等她转到能看见的角度自然算上。
-     *
-     * <p>本能开打也要过权限层:一只有名字的敌对生物,没有主人点头就不是一场能打的仗
-     * ——开了也是 attack 在局面里把它剔掉、当场收场、下一刻再开,循环打转。
+     * <p>「正在攻击她」这条不在 `SCAN_RADIUS` 之外扩——32 格已覆盖骷髅、掠夺者、幻翼、恶魂的常规射程;
+     * 更远处的怪不在这里越权,交给模型决定。
      */
     private List<Mob> dangersNear(NumenPlayer companion) {
         double radius = guardRadius(companion);
         List<Mob> near = new ArrayList<>();
         for (Mob m : Menace.hostilesAround(companion, SCAN_RADIUS)) {
-            // 进警戒半径才管:再远就交给模型,这里不越权
-            if (companion.distanceTo(m) > radius) {
+            double dist = companion.distanceTo(m);
+            boolean inRadius = dist <= radius;
+            // 正在攻击她:mob 锁定她(mob.getTarget() == 她)或刚打过她(lastHurtByMob == 她)
+            boolean engaging = m.getTarget() == companion || m == companion.getLastHurtByMob();
+            // 没进警戒半径、又没在打她 —— 不归这条本能管
+            if (!inRadius && !engaging) {
                 continue;
             }
             // 看不见的够不着:隔着墙当它是危险,只会对着墙空转
@@ -221,7 +222,7 @@ public final class MobDefenseChain implements Task, Reflex {
         return near;
     }
 
-    /** 这一眼的警戒半径:有远程武器(枪/弓/弩)15 格,否则近战 6 格。 */
+    /** 这一眼的警戒半径:有远程武器(枪/弓/弩)25 格,否则近战 10 格。 */
     private double guardRadius(NumenPlayer companion) {
         Loadout loadout = Loadout.forTarget(companion, companion);
         // 弓、弩、枪都算远程——弓虽要拉,拉满能射十二格,警戒范围就该够得着
