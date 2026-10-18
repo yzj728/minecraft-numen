@@ -8,24 +8,24 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 
 /**
- * 主手是拔刀剑时接管近战挥击。招式由 {@link ComboRhythm} <b>按身体独立</b>地轮换,四拍一个循环:
- * <ol>
- *   <li>{@code step%4==0} —— 地面连段 A 起手({@code COMBO_A1});</li>
- *   <li>{@code step%4==1} —— 挑空({@code UPPERSLASH});</li>
- *   <li>{@code step%4==2} —— 疾走居合({@code RAPID_SLASH});</li>
- *   <li>{@code step%4==3} —— 放一次 SA(收尾)。</li>
- * </ol>
+ * 主手是拔刀剑时接管近战挥击。招式<b>随机</b>从 {@link SlashBlade} 的池里抽(地面连段、挑空、
+ * 疾走居合、空中下劈、空中连段、晨星),SA(普通/超SA)按概率穿插,不按固定次序。
  *
- * <p>每一招<b>播够 {@link ComboRhythm#PER_MOVE_TICKS} 拍才换下一招</b>,不是每挥一下就换;
- * 这样普通连段、挑空、疾走居合三种招都能被明确轮到,而不是像网点自动推进那样「挥两下就到底」。
- * 换招由 Numen 自己掌控(直接 {@code updateComboSeq} 切 combo),不依赖拔刀剑那套帧超时状态机。
+ * <p>每一招<b>播够 {@link ComboRhythm#PER_MOVE_TICKS} 拍才换下一招</b>,不是每挥一下就换——
+ * 招式切得太勤,刀光/位移根本没播完就被打断。换招由 Numen 自己掌控(直接 {@code updateComboSeq} 切 combo),
+ * 不依赖拔刀剑那套帧超时状态机。
+ *
+ * <p><b>目标在近战范围外 → 疾走居合先接近</b>:由 {@link SlashBlade#advanceCombo} 判——远了就先瞬移前冲,
+ * 而不是站在原地空挥。这在随机抽招之上加了「够不着先贴上去」这条,让随机不等于乱打。
  *
  * <p><b>为什么状态挂在身体上、不挂在单例上</b>:这个 {@code MeleeStyle} 由 {@code MeleeStyles.register}
- * 注册一次,是共享的单例。招式的步进计数器如果挂在单例字段上,会像上一版那个 SA 计时器一样,
- * 死了复活换新身体后残留旧值——现在把 {@link ComboRhythm} 存进 {@link NumenPlayer#state},跟着身体走,
- * 新身体自带归零的干净节奏。
+ * 注册一次,是共享的单例。节奏状态如果挂在单例字段上,会像第一版那个 SA 计时器一样,死了复活换新身体后
+ * 残留旧值——现在把 {@link ComboRhythm} 存进 {@link NumenPlayer#state},跟着身体走,新身体自带归零的干净节奏。
  */
 final class SlashBladeMelee implements MeleeStyle {
+
+    /** 每次该换招时,这一拍放 SA 的概率(其余为随机普通招)。 */
+    private static final int SA_CHANCE_DENOMINATOR = 4;   // 1/4
 
     @Override
     public boolean applies(NumenPlayer fighter, LivingEntity target) {
@@ -48,20 +48,16 @@ final class SlashBladeMelee implements MeleeStyle {
             return true;
         }
 
-        // 取出「当前这一拍轮到哪一招」,并步进到下一拍(下一拍是下一招)。
-        int step = rhythm.step();
         rhythm.advance(fighter.tickCount);
 
-        if (step % 4 == 3) {
-            // 三个普通招轮完,收尾放一次 SA,放完自然进入下一轮(A1)。
+        // 按概率决定这一拍放 SA 还是随机普通招。SA 放不出(断刀/封印/无附魔)就退回普通招。
+        if (fighter.getRandom().nextInt(SA_CHANCE_DENOMINATOR) == 0) {
             if (SlashBlade.trySlashArts(fighter, blade, target)) {
                 return true;
             }
-            // 放不出(断刀/封印/无附魔)——仍当作这一格用掉,继续下一格,避免每拍徒劳重试。
         }
 
-        // 切到当前步对应的普通招:直接指定 combo,第一击当场打出,后续由 ticker 播完。
-        if (SlashBlade.advanceCombo(fighter, blade, target, step)) {
+        if (SlashBlade.advanceCombo(fighter, blade, target, fighter.getRandom())) {
             return true;
         }
 
@@ -72,25 +68,18 @@ final class SlashBladeMelee implements MeleeStyle {
     }
 
     /**
-     * 一具身体自己的招式轮换节奏:当前步进 {@code step}(每次 {@link #advance} 单调 +1),
-     * 以及「当前这一招从哪一刻开始播」{@code lastTick}。每招最多播 {@link #PER_MOVE_TICKS} 拍;
-     * 既没播满、又没结束时先不换招。
+     * 一具身体自己的出招节奏:只记「当前这一招从哪一刻开始播」{@code lastTick}。
+     * 每招最多播 {@link #PER_MOVE_TICKS} 拍;既没播满、又没结束时先不换招。选什么招由上层随机,
+     * 这里不再有固定的步进次序。
      */
     static final class ComboRhythm {
         /** 一招最多播这么久(拍)再允许换下一招。20 拍 = 1 秒,足够刀光/位移播完。 */
         static final int PER_MOVE_TICKS = 20;
 
-        private int step;
         private int lastTick = Integer.MIN_VALUE;
 
-        /** 当前步进(0 起,单调递增,跨轮不归零——用 {@code step % 4} 取动作)。 */
-        int step() {
-            return step;
-        }
-
-        /** 进入下一拍,并以 {@code nowTick} 记为「这一招的起点」。 */
+        /** 进入下一招,并以 {@code nowTick} 记为「这一招的起点」。 */
         void advance(int nowTick) {
-            step++;
             lastTick = nowTick;
         }
 
