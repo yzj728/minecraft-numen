@@ -132,11 +132,14 @@ public final class SlashBlade {
         });
     }
 
-    /** 附近最近的「够得着、看得见」的敌对生物。找不到返回 null。 */
+    /**
+     * 附近最近的「看得见」的敌对生物,锁定半径与近战警戒半径一致({@code 6} 格)。
+     * 找不到返回 null。优先最近、够不着的不锁——锁一个墙后八格外的目标只会徒劳。
+     */
     public static LivingEntity nearestTarget(LivingEntity entity) {
         LivingEntity best = null;
         double bestDist = Double.MAX_VALUE;
-        double reach = 8.0;
+        double reach = 6.0;
         for (LivingEntity other : entity.level().getEntitiesOfClass(LivingEntity.class,
                 entity.getBoundingBox().inflate(reach), e -> true)) {
             if (other == entity || !other.isAlive() || other.isSpectator()) {
