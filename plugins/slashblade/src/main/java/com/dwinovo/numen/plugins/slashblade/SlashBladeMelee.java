@@ -10,10 +10,10 @@ import net.minecraft.world.item.ItemStack;
 /**
  * 主手是拔刀剑时接管近战挥击。招式由 {@link ComboRhythm} <b>按身体独立</b>地轮换:
  * <ol>
- *   <li>{@code step%4==0} —— 地面连段 A 起手({@code COMBO_A1});</li>
- *   <li>{@code step%4==1} —— 挑空({@code UPPERSLASH});</li>
- *   <li>{@code step%4==2} —— 疾走居合({@code RAPID_SLASH});</li>
- *   <li>{@code step%4==3} —— 放一次 SA(收尾)。</li>
+ *   <li>{@code step%4==1} —— 地面连段 A 起手({@code COMBO_A1});</li>
+ *   <li>{@code step%4==2} —— 挑空({@code UPPERSLASH});</li>
+ *   <li>{@code step%4==3} —— 疾走居合({@code RAPID_SLASH});</li>
+ *   <li>{@code step%4==0} —— 放一次 SA(收尾)。</li>
  * </ol>
  *
  * <p>每一招<b>播够 {@link ComboRhythm#PER_MOVE_TICKS} 拍才换下一招</b>,不是每挥一下就换;
@@ -43,23 +43,23 @@ final class SlashBladeMelee implements MeleeStyle {
 
         ComboRhythm rhythm = fighter.state(ComboRhythm.class, ComboRhythm::new);
 
-        // 上一招还没播满、而且这招还没结束 → 不切,等它播完(这一拍什么都不做,挥臂由招式自己的 tick 驱动)。
-        if (!rhythm.elapsed(fighter.tickCount) && SlashBlade.isBusy(fighter, blade)) {
+        // 上一招既没播满、又没结束 → 这一拍不动,等它播完(招式自身的 tick 驱动刀光/位移)。
+        if (rhythm.isPlaying(fighter.tickCount) && SlashBlade.isBusy(fighter, blade)) {
             return true;
         }
 
-        int step = rhythm.nextStep();
-        if (step % 4 == 3) {
-            // 轮完三个普通招,收尾放一次 SA,放完回到第 0 步重开一轮。
+        int step = rhythm.nextStep(fighter.tickCount);
+        if (step % 4 == 0) {
+            // 三个普通招轮完,这一格收尾放一次 SA,放完回第 1 步重开一轮。
             if (SlashBlade.trySlashArts(fighter, blade, target)) {
-                rhythm.reset();
+                rhythm.reset(fighter.tickCount);
                 return true;
             }
             // 放不出(断刀/封印/无附魔)——仍当作这一格用掉,避免每拍徒劳重试。
-            rhythm.reset();
+            rhythm.reset(fighter.tickCount);
         }
 
-        // 切到下一个普通招:直接指定 combo,第一击当场打出,后续由 ticker 播完。
+        // 切到当前步对应的普通招:直接指定 combo,第一击当场打出,后续由 ticker 播完。
         if (SlashBlade.advanceCombo(fighter, blade, target, rhythm.step())) {
             return true;
         }
@@ -71,35 +71,37 @@ final class SlashBladeMelee implements MeleeStyle {
     }
 
     /**
-     * 一具身体自己的招式轮换节奏:当前步进 {@code step},上一次切招时的 {@code lastTick}。
-     * 每招最多播 {@link #PER_MOVE_TICKS} 拍;上一招既没播满、又还没结束时不换招。
+     * 一具身体自己的招式轮换节奏:当前步进 {@code step},以及「当前这一招从哪一刻开始播」{@code lastTick}。
+     * 每招最多播 {@link #PER_MOVE_TICKS} 拍;既没播满、又没结束时先不换招。
      */
     static final class ComboRhythm {
         /** 一招最多播这么久(拍)再允许换下一招。20 拍 = 1 秒,足够刀光/位移播完。 */
         static final int PER_MOVE_TICKS = 20;
 
-        private int step;
-        private int lastTick;
+        private int step = -1;
+        private int lastTick = Integer.MIN_VALUE;
 
-        /** 上一招是否已播满规定拍数。 */
-        boolean elapsed(int nowTick) {
-            return nowTick - lastTick >= PER_MOVE_TICKS;
+        /** 当前这一步的招是否还在播放窗口内(没播满规定拍数)。 */
+        boolean isPlaying(int nowTick) {
+            return nowTick - lastTick < PER_MOVE_TICKS;
         }
 
-        /** 步进到下一招,并记住这一刻为「本招起点」。 */
-        int nextStep() {
-            return ++step;
+        /** 步进到下一招,并以 {@code nowTick} 记为「本招起点」,返回新步进。 */
+        int nextStep(int nowTick) {
+            step++;
+            lastTick = nowTick;
+            return step;
         }
 
-        /** 当前步进。 */
+        /** 当前步进(0 起)。 */
         int step() {
             return step;
         }
 
-        /** 回到本轮起点,重新计时。 */
-        void reset() {
-            step = 0;
-            lastTick = -PER_MOVE_TICKS;
+        /** 回到本轮起点(第 -1 步),下一拍从第 0 步开始。 */
+        void reset(int nowTick) {
+            step = -1;
+            lastTick = nowTick - PER_MOVE_TICKS;   // 立即允许切入第 0 步
         }
     }
 }
