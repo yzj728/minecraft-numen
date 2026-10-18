@@ -165,20 +165,17 @@ public final class SlashBlade {
 
     // ==================== 招式轮换 ====================
 
-    /**
-     * 轮换的普通招式,按 {@link #advanceCombo} 里的序号 {@code step % 4} 轮流取。
+    /** 步进序号到「普通招式」的映射,与 {@link SlashBladeMelee.ComboRhythm} 的约定一一对应:
      * <ol>
-     *   <li>0 —— 地面连段 A 起手({@code COMBO_A1});</li>
-     *   <li>1 —— 挑空({@code UPPERSLASH});</li>
-     *   <li>2 —— 疾走居合({@code RAPID_SLASH});</li>
+     *   <li>{@code step%4==1} —— 地面连段 A 起手({@code COMBO_A1},空中则空中下劈);</li>
+     *   <li>{@code step%4==2} —— 挑空({@code UPPERSLASH});</li>
+     *   <li>{@code step%4==3} —— 疾走居合({@code RAPID_SLASH});</li>
      * </ol>
-     * 序号 3 不放普通招,留给 SA 收尾(见 {@link SlashBladeMelee})。这样三种招式都能轮到,
-     * 不是只有 A1 一条链,也不会「挥两下就到底」。
-     */
+     * {@code step%4==0} 是 SA 收尾档,不走这里。*/
     private static ResourceLocation moveComboFor(int step, boolean onGround) {
         return switch (step % 4) {
-            case 1 -> ComboStateRegistry.UPPERSLASH.getId();
-            case 2 -> ComboStateRegistry.RAPID_SLASH.getId();
+            case 2 -> ComboStateRegistry.UPPERSLASH.getId();
+            case 3 -> ComboStateRegistry.RAPID_SLASH.getId();
             default -> onGround
                     ? ComboStateRegistry.COMBO_A1.getId()
                     : ComboStateRegistry.AERIAL_CLEAVE.getId();
@@ -187,8 +184,6 @@ public final class SlashBlade {
 
     /**
      * 显式切入序号 {@code step} 对应的那一招(直接指定 combo,不依赖网点推进)。
-     *
-     * @return 切进去的是不是招式的「起手」(step%4 落在普通招那一档);是则播完这招后下一拍可换下一招。
      */
     public static boolean advanceCombo(LivingEntity entity, ItemStack blade, LivingEntity target, int step) {
         if (!isSlashBlade(blade)) {
