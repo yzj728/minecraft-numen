@@ -8,12 +8,12 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
 
 /**
- * 主手是拔刀剑时接管近战挥击。招式由 {@link ComboRhythm} <b>按身体独立</b>地轮换:
+ * 主手是拔刀剑时接管近战挥击。招式由 {@link ComboRhythm} <b>按身体独立</b>地轮换,四拍一个循环:
  * <ol>
- *   <li>{@code step%4==1} —— 地面连段 A 起手({@code COMBO_A1});</li>
- *   <li>{@code step%4==2} —— 挑空({@code UPPERSLASH});</li>
- *   <li>{@code step%4==3} —— 疾走居合({@code RAPID_SLASH});</li>
- *   <li>{@code step%4==0} —— 放一次 SA(收尾)。</li>
+ *   <li>{@code step%4==0} —— 地面连段 A 起手({@code COMBO_A1});</li>
+ *   <li>{@code step%4==1} —— 挑空({@code UPPERSLASH});</li>
+ *   <li>{@code step%4==2} —— 疾走居合({@code RAPID_SLASH});</li>
+ *   <li>{@code step%4==3} —— 放一次 SA(收尾)。</li>
  * </ol>
  *
  * <p>每一招<b>播够 {@link ComboRhythm#PER_MOVE_TICKS} 拍才换下一招</b>,不是每挥一下就换;
@@ -48,19 +48,20 @@ final class SlashBladeMelee implements MeleeStyle {
             return true;
         }
 
-        int step = rhythm.nextStep(fighter.tickCount);
-        if (step % 4 == 0) {
-            // 三个普通招轮完,这一格收尾放一次 SA,放完回第 1 步重开一轮。
+        // 取出「当前这一拍轮到哪一招」,并步进到下一拍(下一拍是下一招)。
+        int step = rhythm.step();
+        rhythm.advance(fighter.tickCount);
+
+        if (step % 4 == 3) {
+            // 三个普通招轮完,收尾放一次 SA,放完自然进入下一轮(A1)。
             if (SlashBlade.trySlashArts(fighter, blade, target)) {
-                rhythm.reset(fighter.tickCount);
                 return true;
             }
-            // 放不出(断刀/封印/无附魔)——仍当作这一格用掉,避免每拍徒劳重试。
-            rhythm.reset(fighter.tickCount);
+            // 放不出(断刀/封印/无附魔)——仍当作这一格用掉,继续下一格,避免每拍徒劳重试。
         }
 
         // 切到当前步对应的普通招:直接指定 combo,第一击当场打出,后续由 ticker 播完。
-        if (SlashBlade.advanceCombo(fighter, blade, target, rhythm.step())) {
+        if (SlashBlade.advanceCombo(fighter, blade, target, step)) {
             return true;
         }
 
@@ -71,37 +72,31 @@ final class SlashBladeMelee implements MeleeStyle {
     }
 
     /**
-     * 一具身体自己的招式轮换节奏:当前步进 {@code step},以及「当前这一招从哪一刻开始播」{@code lastTick}。
-     * 每招最多播 {@link #PER_MOVE_TICKS} 拍;既没播满、又没结束时先不换招。
+     * 一具身体自己的招式轮换节奏:当前步进 {@code step}(每次 {@link #advance} 单调 +1),
+     * 以及「当前这一招从哪一刻开始播」{@code lastTick}。每招最多播 {@link #PER_MOVE_TICKS} 拍;
+     * 既没播满、又没结束时先不换招。
      */
     static final class ComboRhythm {
         /** 一招最多播这么久(拍)再允许换下一招。20 拍 = 1 秒,足够刀光/位移播完。 */
         static final int PER_MOVE_TICKS = 20;
 
-        private int step = -1;
+        private int step;
         private int lastTick = Integer.MIN_VALUE;
 
-        /** 当前这一步的招是否还在播放窗口内(没播满规定拍数)。 */
-        boolean isPlaying(int nowTick) {
-            return nowTick - lastTick < PER_MOVE_TICKS;
-        }
-
-        /** 步进到下一招,并以 {@code nowTick} 记为「本招起点」,返回新步进。 */
-        int nextStep(int nowTick) {
-            step++;
-            lastTick = nowTick;
-            return step;
-        }
-
-        /** 当前步进(0 起)。 */
+        /** 当前步进(0 起,单调递增,跨轮不归零——用 {@code step % 4} 取动作)。 */
         int step() {
             return step;
         }
 
-        /** 回到本轮起点(第 -1 步),下一拍从第 0 步开始。 */
-        void reset(int nowTick) {
-            step = -1;
-            lastTick = nowTick - PER_MOVE_TICKS;   // 立即允许切入第 0 步
+        /** 进入下一拍,并以 {@code nowTick} 记为「这一招的起点」。 */
+        void advance(int nowTick) {
+            step++;
+            lastTick = nowTick;
+        }
+
+        /** 当前这一招是否还在播放窗口内(没播满规定拍数)。 */
+        boolean isPlaying(int nowTick) {
+            return nowTick - lastTick < PER_MOVE_TICKS;
         }
     }
 }
