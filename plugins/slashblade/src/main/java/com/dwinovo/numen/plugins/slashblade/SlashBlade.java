@@ -1,6 +1,7 @@
 package com.dwinovo.numen.plugins.slashblade;
 
 import mods.flammpfeil.slashblade.capability.concentrationrank.CapabilityConcentrationRank;
+import mods.flammpfeil.slashblade.capability.concentrationrank.IConcentrationRank;
 import mods.flammpfeil.slashblade.capability.slashblade.ISlashBladeState;
 import mods.flammpfeil.slashblade.item.ItemSlashBlade;
 import mods.flammpfeil.slashblade.item.SwordType;
@@ -30,12 +31,13 @@ import java.util.Objects;
 /**
  * 本插件对接拔刀剑(SlashBlade:Resharped)的那一面——<b>唯一</b>知道拔刀剑类型的地方。
  *
- * <h2>招式轮换 + SA 特效补丁</h2>
+ * <h2>招式池 + 随机出招</h2>
  * 拔刀剑自己的连段状态机是「帧数超时 + next/nextOfTimeout 网点」自动推进的,那套东西为真玩家的
  * 按键节奏设计,对假玩家(没有真实按键时序)完全不可控——普通连段 A1/A2 的下一段是 {@code buildFromFrame(5)}
  * 这种「几帧」超时,{@code resolvCurrentComboState} 每被读一次就把它们往前推,于是「挥两下就到底」。
- * 因此这里<b>不依赖网点推进</b>,改由 Numen 自己在若干招式之间轮换,每招用 {@code updateComboSeq} 显式切入
- * (它内部 {@code clickAction} 是完整的第一击),普通连段、挑空、疾走居合都能被明确轮到。
+ * 因此这里<b>不依赖网点推进</b>,改由 Numen 在若干招式之间<b>随机</b>挑,每招用 {@code updateComboSeq} 显式切入
+ * (它内部 {@code clickAction} 是完整的第一击)。招式池覆盖地面连段、挑空、疾走居合、空中下劈、空中连段、晨星,
+ * 空战与地面招混着出,不按固定次序。
  *
  * <p>「判断斩」这类 SA 的<b>特效</b>在 {@code ComboState.tickAction} 的 {@code TimeLineTickAction.put(0, …)}
  * 里,靠 ticker 逐刻驱动,而假玩家的 ticker 时序对不齐,于是切过去「后退、收刀都出了,唯独中间召唤次元斩
@@ -108,7 +110,14 @@ public final class SlashBlade {
                 .orElseGet(List::of);
     }
 
-    /** 能不能放超级 SA:妖 + 锐利边缘 + 非断刀 + 非封印 + 满耐久 + 站地面。 */
+    /** 这一刻评价是否到 SSS——原版放超SA的门槛,不白嫖:评价自然涨跌,到了才放得出来。 */
+    private static boolean isSssRank(LivingEntity entity) {
+        return entity.getCapability(CapabilityConcentrationRank.RANK_POINT)
+                .map(rank -> rank.getRank(entity.level().getGameTime()) == IConcentrationRank.ConcentrationRanks.SSS)
+                .orElse(false);
+    }
+
+    /** 能不能放超级 SA:评价 SSS + 妖 + 锐利边缘 + 非断刀 + 非封印 + 满耐久 + 站地面。 */
     private static boolean canSuper(ItemStack blade, LivingEntity entity) {
         if (!isSlashBlade(blade)) {
             return false;
@@ -119,27 +128,22 @@ public final class SlashBlade {
         if (!basic || !entity.onGround()) {
             return false;
         }
+        if (!isSssRank(entity)) {
+            return false;   // 评价没到 SSS 放不出超SA——不白嫖,评价自然涨
+        }
         return blade.getCapability(ItemSlashBlade.BLADESTATE)
                 .map(state -> !state.isBroken() && state.getDamage() == 0)
                 .orElse(false);
     }
 
-    /** 把假玩家的评价等级顶满 SSS(1800)。 */
-    private static void fullRank(LivingEntity entity) {
-        entity.getCapability(CapabilityConcentrationRank.RANK_POINT).ifPresent(rank -> {
-            rank.setRawRankPoint(1800);
-            rank.setLastUpdte(entity.level().getGameTime());
-        });
-    }
-
     /**
-     * 附近最近的「看得见」的敌对生物,锁定半径与近战警戒半径一致({@code 6} 格)。
-     * 找不到返回 null。优先最近、够不着的不锁——锁一个墙后八格外的目标只会徒劳。
+     * 附近最近的「看得见」的敌对生物,锁定半径与近战警戒半径一致({@code 10} 格)。
+     * 找不到返回 null。优先最近、够不着的不锁——锁一个墙后远方的目标只会徒劳。
      */
     public static LivingEntity nearestTarget(LivingEntity entity) {
         LivingEntity best = null;
         double bestDist = Double.MAX_VALUE;
-        double reach = 6.0;
+        double reach = 10.0;
         for (LivingEntity other : entity.level().getEntitiesOfClass(LivingEntity.class,
                 entity.getBoundingBox().inflate(reach), e -> true)) {
             if (other == entity || !other.isAlive() || other.isSpectator()) {
@@ -166,40 +170,44 @@ public final class SlashBlade {
         return best;
     }
 
-    // ==================== 招式轮换 ====================
+    // ==================== 招式池 ====================
 
     /**
-     * 步进序号到「普通招式」的映射。循环是四拍,与 {@link SlashBladeMelee.ComboRhythm} 一一对应:
-     * <ol>
-     *   <li>{@code step%4==0} —— 地面连段 A 起手({@code COMBO_A1},空中则空中下劈);</li>
-     *   <li>{@code step%4==1} —— 挑空({@code UPPERSLASH});</li>
-     *   <li>{@code step%4==2} —— 疾走居合({@code RAPID_SLASH});</li>
-     * </ol>
-     * {@code step%4==3} 是 SA 收尾,不走这里。
+     * 普通招式池,随机抽一个(不含 SA;SA 由调用方另按概率决定)。
+     * 地面连段、挑空、疾走居合、空中下劈、空中连段、晨星——空战与地面招混搭,不按固定次序。
      */
-    private static ResourceLocation moveComboFor(int step, boolean onGround) {
-        return switch (step % 4) {
+    private static ResourceLocation randomMove(LivingEntity entity, RandomSource rng) {
+        int r = rng.nextInt(6);
+        return switch (r) {
+            case 0 -> ComboStateRegistry.COMBO_A1.getId();
             case 1 -> ComboStateRegistry.UPPERSLASH.getId();
             case 2 -> ComboStateRegistry.RAPID_SLASH.getId();
-            default -> onGround
-                    ? ComboStateRegistry.COMBO_A1.getId()
-                    : ComboStateRegistry.AERIAL_CLEAVE.getId();
+            case 3 -> ComboStateRegistry.AERIAL_CLEAVE.getId();
+            case 4 -> ComboStateRegistry.AERIAL_RAVE_A1.getId();
+            default -> ComboStateRegistry.RISING_STAR.getId();
         };
     }
 
+    /** 近战够不着的距离阈值:超过它,先疾走居合(瞬移前冲)接近,而不是原地空挥。 */
+    private static final double RUSH_THRESHOLD = 5.0;
+
     /**
-     * 显式切入序号 {@code step} 对应的那一招(直接指定 combo,不依赖网点推进)。
+     * 随机切入一个普通招式。若目标在近战够到距离之外,优先疾走居合(瞬移前冲)接近。
+     *
+     * @return false = 这一拍没切(刀不是拔刀剑),调用方走兜底。
      */
-    public static boolean advanceCombo(LivingEntity entity, ItemStack blade, LivingEntity target, int step) {
+    public static boolean advanceCombo(LivingEntity entity, ItemStack blade, LivingEntity target, RandomSource rng) {
         if (!isSlashBlade(blade)) {
             return false;
         }
         entity.lookAt(EntityAnchorArgument.Anchor.FEET, target.position());
+        ResourceLocation loc;
+        if (entity.distanceTo(target) > RUSH_THRESHOLD) {
+            loc = ComboStateRegistry.RAPID_SLASH.getId();   // 远了先冲刺接近
+        } else {
+            loc = randomMove(entity, rng);
+        }
         return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
-            ResourceLocation loc = moveComboFor(step, entity.onGround());
-            if (loc.equals(ComboStateRegistry.NONE.getId())) {
-                return false;
-            }
             state.updateComboSeq(entity, loc);
             entity.swing(InteractionHand.MAIN_HAND);
             return true;
@@ -207,8 +215,8 @@ public final class SlashBlade {
     }
 
     /**
-     * 放一次 SA——评价够放超SA,否则普通 SA。放完 doArts+updateComboSeq 后,对「判断斩类 SA」
-     * 额外直调 {@link JudgementCut} helper 立即补特效(见类注释)。
+     * 放一次 SA。评价够放超SA(SSS),否则普通 SA——评价自然涨跌,不再锁死。
+     * 放完 doArts+updateComboSeq 后,对「判断斩类 SA」额外直调 {@link JudgementCut} helper 立即补特效(见类注释)。
      */
     public static boolean trySlashArts(LivingEntity entity, ItemStack blade, LivingEntity target) {
         if (!isSlashBlade(blade)) {
@@ -223,7 +231,6 @@ public final class SlashBlade {
                 return false;
             }
             state.setTargetEntityId(target.getId());
-            fullRank(entity);
             boolean sup = canSuper(blade, entity);
             SlashArts.ArtsType type = sup ? SlashArts.ArtsType.Super : SlashArts.ArtsType.Success;
             ResourceLocation comboLoc = state.getSlashArts().doArts(type, entity);
@@ -320,7 +327,7 @@ public final class SlashBlade {
         }).orElse(new Art(false, "", "the slash blade has no blade state"));
     }
 
-    /** 放一次剑技:先补锁定+拉满评价,再 doArts → updateComboSeq。判断斩类补 helper 特效。 */
+    /** 放一次剑技:先补锁定,再 doArts → updateComboSeq。判断斩类补 helper 特效。评价不锁,自然涨跌。 */
     private static Art doArt(LivingEntity entity, ISlashBladeState state, SlashArts.ArtsType artsType, Entity target) {
         if (state.isBroken()) {
             return new Art(false, artOf(state), "the blade is broken; repair it first");
@@ -334,7 +341,6 @@ public final class SlashBlade {
         if (target != null) {
             state.setTargetEntityId(target.getId());
         }
-        fullRank(entity);
         ResourceLocation comboLoc = state.getSlashArts().doArts(artsType, entity);
         ComboState combo = ComboStateRegistry.REGISTRY.get().getValue(comboLoc);
         if (combo == null || Objects.equals(comboLoc, ComboStateRegistry.NONE.getId())) {
