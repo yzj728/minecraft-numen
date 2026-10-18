@@ -28,7 +28,7 @@ import java.util.Locale;
  * 不直接指定打谁(它朝面朝方向放),伤害落到谁由拔刀剑结算。
  *
  * <p><b>什么时候用哪条路</b>:点名打谁、自卫,照旧 {@code numen.fight.attack} / {@code numen.fight.clear}
- * ——主手是拔刀剑时普通挥击自动走拔刀剑管线(带冷却自动搓随机档位的招),不用额外做任何事;{@code art} 是
+ * ——主手是拔刀剑时普通挥击自动走拔刀剑管线(连段走到可蓄力档位才放 SA,穿插在普通连段之间),不用额外做任何事;{@code art} 是
  * 主动放剑技的口子(指定档次或随机),{@code release} 是直接放一个具体招式(疾走居合/挑空/空中技,完全跳过搓招),
  * {@code combo} 是主动打一整套连击。
  *
@@ -119,7 +119,8 @@ public final class SlashBladeApi {
     @Example("slashblade.blade.swing()")
     @Note("One plain slash per call. It does not aim or travel: face the target first.")
     @Note("For an actual fight, keep using numen.fight.attack — when your main hand is a slash blade, the melee "
-            + "strike goes through SlashBlade automatically (with cooldown it even releases a random slash art).")
+            + "strike goes through SlashBlade automatically (the combo string runs, and when it reaches a "
+            + "chargeable state the slash art releases).")
     @SeeAlso({"slashblade.blade.held", "slashblade.blade.art", "numen.fight.attack"})
     public static Action swing(ServerCall call) {
         NumenPlayer her = call.her();
