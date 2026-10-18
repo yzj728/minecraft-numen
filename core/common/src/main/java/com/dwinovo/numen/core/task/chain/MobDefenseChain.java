@@ -36,13 +36,12 @@ import java.util.List;
  * 重派等于从头挖一遍。跟随也是一样:被打断打完,回来接着跟。
  *
  * <h2>什么算危险</h2>
- * 看的是<b>它已经逼到多近</b>:还远就有时间(模型看得见它,该由模型决定),近了就没有提前量,
- * 当场接管。这条线按威胁类型取自 {@link Menace}——爬行者 7.5(引信开始倒退的距离)、
- * 末影水晶 12(爆炸威力的两倍)、寻常怪 {@link #MELEE_DANGER}。
+ * 看的是<b>它已经进到多近</b>:进了<b>警戒半径</b>就算危险,当场接管——
+ * 近战 {@link #MELEE_GUARD_RADIUS} 6 格,持远程武器(枪/弓/弩)时放宽到 {@link #RANGED_GUARD_RADIUS} 15 格。
+ * 警戒只看「它进没进半径」,<b>不要求它已经锁定她</b>:一只敌对生物凑近就该打,等它先动手就晚了。
  *
- * <p><b>持枪时这条线放宽到枪的交战距离</b>({@link RangedFirearm#engagementRange}):枪手
- * 该在敌人进射程的那一刻就还手,而不是等它贴脸挨一下才反应——"看见就打"是枪的本分,
- * 近战那条线是留给没远程手段时的。
+ * <p><b>优先打最近的</b>:不是这条链挑,是 {@code attack} 自己的目标选择(挑最近的、选定后打完再换)。
+ * 这条链只负责「进警戒半径 → 开一场无差别战斗」。
  */
 public final class MobDefenseChain implements Task, Reflex {
 
@@ -53,12 +52,17 @@ public final class MobDefenseChain implements Task, Reflex {
     private static final double SCAN_RADIUS = 32.0;
 
     /**
-     * 寻常近战怪逼到这么近就算危险。
+     * 近战的警戒半径:敌对生物进到这么近就主动开打。
      *
-     * <p>爬行者与末影水晶那两条线是从原版推出来的(引信倒退距离、爆炸威力两倍),这一条不是
-     * ——它是"它下一步就能打到我"的经验值。要更硬该去读每种怪自己的攻击距离。
+     * <p>比原版近战危险半径(僵尸约 2~4 格)宽,是为了「先下手」——等它贴脸才反应就失去了
+     * 近战该有的提前量。它不必已经锁定了她:靠近本身就是危险。
      */
-    private static final double MELEE_DANGER = 4.0;
+    private static final double MELEE_GUARD_RADIUS = 6.0;
+
+    /**
+     * 持远程武器时的警戒半径:枪/弓/弩能打到十五格外,警戒就该那么远——看见就打,不等贴脸。
+     */
+    private static final double RANGED_GUARD_RADIUS = 15.0;
 
     /**
      * 危险离开后还盯这么久才算真的没事。
@@ -183,50 +187,39 @@ public final class MobDefenseChain implements Task, Reflex {
     // ---- 什么算危险 ----
 
     /**
-     * 身边<b>已经没有提前量</b>的威胁。
+     * 身边<b>进入警戒半径</b>的威胁。
      *
-     * <p>只算正在针对她的——防守不是挑衅,一只路过的僵尸猪灵不该被"防御"链招惹。还没逼近的
-     * 那些也不进来:模型看得见它们,该由它决定要不要动手。
+     * <p><b>主动进攻</b>:只要敌对生物进了警戒半径(近战 {@link #MELEE_GUARD_RADIUS}、持远程 {@link #RANGED_GUARD_RADIUS}),
+     * 就算危险,<b>不要求它已经锁定她</b>。防守不是挑衅——但一只敌对生物凑到六格内,
+     * 无论它冲谁来,都该先下手。打了它的那只由它自己记 {@code lastHurtByMob},不在这里拉仇恨。
      *
-     * <p><b>持枪时提前量按枪的交战距离算</b>:敌人进射程(且锁定她/刚打过她)就算危险,当场
-     * 接管开枪——不用等它贴脸。跟随、挖矿、走路时被怪盯上,都在这条线上还手,打完身体归还原活。
+     * <p>本能开打也要过权限层:一只有名字的敌对生物,没有主人点头就不是一场能打的仗
+     * ——开了也是 attack 在局面里把它剔掉、当场收场、下一刻再开,循环打转。
      *
      * <p>模型自己派的 {@code attack} 已经认领的目标同样不算:那场仗有人管了。
      */
     private List<Mob> dangersNear(NumenPlayer companion) {
-        LivingEntity attacker = companion.getLastHurtByMob();
-        // 持枪时提前量是枪的交战距离:敌人一进射程就还手,不等贴脸
-        double reach = firearmReach(companion);
+        double radius = guardRadius(companion);
         List<Mob> near = new ArrayList<>();
         for (Mob m : Menace.hostilesAround(companion, SCAN_RADIUS)) {
-            if (m != attacker && m.getTarget() != companion) {
+            // 进警戒半径才管:再远就交给模型,这里不越权
+            if (companion.distanceTo(m) > radius) {
                 continue;
             }
-            // 本能开打也要过权限层:一只有名字的僵尸追着她,没有主人点头就不是一场能打的仗
-            // ——开了也是 attack 在局面里把它剔掉、当场收场、下一刻再开,循环打转。
+            // 本能开打也要过权限层:一只有名字的僵尸,没有主人点头就不是一场能打的仗
             if (!com.dwinovo.numen.permission.Permission.judge(companion,
                     com.dwinovo.numen.permission.Action.attack(m)).allowed()) {
                 continue;
             }
-
-            // "够危险了没有"与站位、退避问的是<b>同一个函数</b>:它自己的危险半径。
-            // 用一条固定的线时每种怪都判错——爬行者要七格,僵尸两格就够。
-            // 持枪时再加一条:进了枪的射程就算,枪手不等贴脸。
-            if (Menace.tooClose(m, companion) || (reach > 0 && companion.distanceTo(m) <= reach)) {
-                near.add(m);
-            }
+            near.add(m);
         }
         return near;
     }
 
-    /** 她手里有枪时的交战距离(格);没有枪是 0(照近战线判)。 */
-    private double firearmReach(NumenPlayer companion) {
+    /** 这一眼的警戒半径:有远程武器(枪/弓/弩)15 格,否则近战 6 格。 */
+    private double guardRadius(NumenPlayer companion) {
         Loadout loadout = Loadout.forTarget(companion, companion);
-        Loadout.Pick ranged = loadout.ranged();
-        if (ranged == null || !Firearms.isFirearm(ranged.stack())) {
-            return 0.0;
-        }
-        RangedFirearm firearm = Firearms.of(ranged.stack());
-        return firearm == null ? 16.0 : firearm.engagementRange(ranged.stack());
+        // 弓、弩、枪都算远程——弓虽要拉,拉满能射十二格,警戒范围就该够得着
+        return loadout.hasRanged() ? RANGED_GUARD_RADIUS : MELEE_GUARD_RADIUS;
     }
 }
