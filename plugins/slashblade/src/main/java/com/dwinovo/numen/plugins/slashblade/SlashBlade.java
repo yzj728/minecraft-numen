@@ -26,14 +26,18 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.Set;
 
 /**
  * 本插件对接拔刀剑(SlashBlade:Resharped)的那一面——<b>唯一</b>知道拔刀剑类型的地方。
  *
- * <h2>连段流 + SA 特效补丁</h2>
- * 连段流(照车万女仆):普通剑技是连段推进,SA 是节奏到了额外放的大招,超SA 是评价够时放。
- * 但「判断斩」这类 SA 的<b>特效</b>在 {@code ComboState.tickAction} 的 {@code TimeLineTickAction.put(0, …)}
+ * <h2>「一套连段 → 一次 SA」的节奏</h2>
+ * 连招的节奏是:先把<b>一整套</b>地面连段 A(COMBO_A1 → A2 → A3 → A4 → A5)推进到底,
+ * 走到终点(下一段是 none)的<b>下一拍</b>才放一次 SA,放完回到 NONE 再开下一套。SA 不再是
+ * 「停在某个可蓄力档位就放」——那样起手随到挑空/疾走居合这类本身就「可蓄力」的单招时,
+ * 会被误判成「到了放 SA 的时机」,于是 SA 连续放、连段几乎不走。
+ *
+ * <h2>SA 特效补丁</h2>
+ * 「判断斩」这类 SA 的<b>特效</b>在 {@code ComboState.tickAction} 的 {@code TimeLineTickAction.put(0, …)}
  * 里,靠 ticker 逐刻驱动,而假玩家的 ticker 时序对不齐,于是切过去「后退、收刀都出了,唯独中间召唤次元斩
  * 特效没出」。修法:放 SA 后,对「判断斩类 SA」<b>直接调原版 {@link JudgementCut} helper</b>立即生成次元斩实体——
  * 这和 {@code doSlash} 生成实体是同一条已验证可用的链路,不等 ticker。
@@ -162,35 +166,25 @@ public final class SlashBlade {
     // ==================== 连段流 ====================
 
     /**
-     * 连段走到这些「可蓄力」档位时,普通 SA(非超SA)才放得出来。这是原版蓄力判定里的
-     * 「重招」档——COMBO_C、COMBO_A4/A5、COMBO_B7、挑空/空中下劈/疾走居合/晨星的尾段。
-     * 别的档位(起手 COMBO_A1、连段中间)硬放 SA 会打断正在播的连段,而 NONE/STANDBY(还没
-     * 起手)也不该放——那该先起手连段。照车万女仆 sbr_core 的 {@code CHARGE_COMBO}。
+     * 一套连段是否已经走到<b>终点</b>——也就是「这一段的下一段是 none」。
+     * 地面连段 A 的终点是 COMBO_A5(其 next 就是 none)。这是「该放 SA 了」的唯一信号:
+     * 一套打完才放,而不是停在某个「可蓄力」档位就放(那样会撞上起手挑空这类单招)。
      */
-    private static final Set<ComboState> CHARGE_COMBO = Set.of(
-            ComboStateRegistry.COMBO_C.get(),
-            ComboStateRegistry.COMBO_A4.get(),
-            ComboStateRegistry.COMBO_A5.get(),
-            ComboStateRegistry.COMBO_B7.get(),
-            ComboStateRegistry.COMBO_B_END2.get(),
-            ComboStateRegistry.AERIAL_RAVE_A3.get(),
-            ComboStateRegistry.AERIAL_RAVE_B4.get(),
-            ComboStateRegistry.UPPERSLASH.get(),
-            ComboStateRegistry.UPPERSLASH_JUMP.get(),
-            ComboStateRegistry.AERIAL_CLEAVE_LANDING.get(),
-            ComboStateRegistry.RAPID_SLASH_END.get(),
-            ComboStateRegistry.RISING_STAR.get());
-
-    /** 此刻连段是否停在可蓄力档位——这是连段流里放 SA 的唯一依据。 */
-    private static boolean isChargeable(ISlashBladeState state, LivingEntity entity) {
+    private static boolean comboAtEnd(ISlashBladeState state, LivingEntity entity) {
         ResourceLocation cur = state.resolvCurrentComboState(entity);
+        if (cur.equals(ComboStateRegistry.NONE.getId())) {
+            return false;
+        }
         ComboState current = ComboStateRegistry.REGISTRY.get().getValue(cur);
-        return current != null && CHARGE_COMBO.contains(current);
+        if (current == null) {
+            return false;
+        }
+        return current.getNext(entity).equals(ComboStateRegistry.NONE.getId());
     }
 
     /**
-     * 放一次 SA——只有连段走到可蓄力档位才放,评价够放超SA,否则普通 SA。放完 doArts+updateComboSeq 后,
-     * 对「判断斩类 SA」额外直调 {@link JudgementCut} helper 立即补特效(见类注释)。
+     * 放一次 SA——只有<b>上一套连段刚刚走到终点</b>才放,评价够放超SA,否则普通 SA。放完
+     * doArts+updateComboSeq 后,对「判断斩类 SA」额外直调 {@link JudgementCut} helper 立即补特效(见类注释)。
      */
     public static boolean trySlashArts(LivingEntity entity, ItemStack blade, LivingEntity target) {
         if (!isSlashBlade(blade)) {
@@ -204,8 +198,8 @@ public final class SlashBlade {
             if (!SwordType.from(blade).contains(SwordType.ENCHANTED)) {
                 return false;
             }
-            // 不在可蓄力档位就不放:其余时刻交给普通连段推进,连段走到这里再放——这才「穿插」。
-            if (!isChargeable(state, entity)) {
+            // 一套还没打完就不放:先交给连段推进,走到终点下一拍再放。
+            if (!comboAtEnd(state, entity)) {
                 return false;
             }
             state.setTargetEntityId(target.getId());
@@ -239,8 +233,9 @@ public final class SlashBlade {
     }
 
     /**
-     * 普通连段推进:当前连段空闲/将结束 → 按地面/空中起手(COMBO_A/疾走居合/挑空/空中技随机);
-     * 否则 progressCombo 推进下一段。
+     * 普通连段推进:只走地面连段 A(COMBO_A1 起手,一路 progressCombo 推到 A4/A5 终点)。
+     * 空中则走空中下劈。起手<b>不再随机抽疾走居合/挑空</b>——它们是终结技/单招,会污染
+     * 「一套打完」的判定,导致 SA 连发。
      */
     public static boolean advanceCombo(LivingEntity entity, ItemStack blade, LivingEntity target) {
         if (!isSlashBlade(blade)) {
@@ -256,15 +251,9 @@ public final class SlashBlade {
             boolean idle = cur.equals(ComboStateRegistry.NONE.getId())
                     || current.getNext(entity).equals(ComboStateRegistry.NONE.getId());
             if (idle) {
+                // 起手:地面走连段 A,空中走空中下劈。固定起手,不求其花哨——一套一套来。
                 if (entity.onGround()) {
-                    int r = entity.getRandom().nextInt(6);
-                    if (r == 0) {
-                        state.updateComboSeq(entity, ComboStateRegistry.RAPID_SLASH.getId());
-                    } else if (r == 1) {
-                        state.updateComboSeq(entity, ComboStateRegistry.UPPERSLASH.getId());
-                    } else {
-                        state.updateComboSeq(entity, ComboStateRegistry.COMBO_A1.getId());
-                    }
+                    state.updateComboSeq(entity, ComboStateRegistry.COMBO_A1.getId());
                 } else {
                     state.updateComboSeq(entity, ComboStateRegistry.AERIAL_CLEAVE.getId());
                 }
