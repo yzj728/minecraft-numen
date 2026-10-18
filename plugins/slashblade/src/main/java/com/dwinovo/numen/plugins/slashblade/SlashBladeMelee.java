@@ -6,24 +6,26 @@ import com.dwinovo.numen.entity.NumenPlayer;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.item.ItemStack;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
- * 主手是拔刀剑时接管近战挥击,照车万女仆「真正的力量」<b>连段流</b>:
+ * 主手是拔刀剑时接管近战挥击。招式由 {@link ComboRhythm} <b>按身体独立</b>地轮换:
  * <ol>
- *   <li><b>一套连段打完</b>的下一拍 → {@link SlashBlade#trySlashArts} 放一次 SA(评价够则超SA,否则普通 SA);</li>
- *   <li>否则 → {@link SlashBlade#advanceCombo} 起手/推进地面连段 A(COMBO_A1 → A2 → A3 → A4 → A5)。</li>
+ *   <li>{@code step%4==0} —— 地面连段 A 起手({@code COMBO_A1});</li>
+ *   <li>{@code step%4==1} —— 挑空({@code UPPERSLASH});</li>
+ *   <li>{@code step%4==2} —— 疾走居合({@code RAPID_SLASH});</li>
+ *   <li>{@code step%4==3} —— 放一次 SA(收尾)。</li>
  * </ol>
  *
- * <p>这是「先打完一套连招、再放大招」的节奏:普通剑技是连段本身,SA 是每套连段收尾时额外放的大招,
- * 超SA 是评价够时放。SA 的释放<b>只由「上一套连段是否走到终点」决定</b>,不再靠一个挂在单例上的计时器——
- * 计时器是共享的,复活后新身体 {@code tickCount} 归零、旧值残留,会导致复活后 SA 再也放不出来;
- * 也不再靠「停在可蓄力档位」判断——那会撞上起手招,导致 SA 连发、连段不走。
+ * <p>每一招<b>播够 {@link ComboRhythm#PER_MOVE_TICKS} 拍才换下一招</b>,不是每挥一下就换;
+ * 这样普通连段、挑空、疾走居合三种招都能被明确轮到,而不是像网点自动推进那样「挥两下就到底」。
+ * 换招由 Numen 自己掌控(直接 {@code updateComboSeq} 切 combo),不依赖拔刀剑那套帧超时状态机。
+ *
+ * <p><b>为什么状态挂在身体上、不挂在单例上</b>:这个 {@code MeleeStyle} 由 {@code MeleeStyles.register}
+ * 注册一次,是共享的单例。招式的步进计数器如果挂在单例字段上,会像上一版那个 SA 计时器一样,
+ * 死了复活换新身体后残留旧值——现在把 {@link ComboRhythm} 存进 {@link NumenPlayer#state},跟着身体走,
+ * 新身体自带归零的干净节奏。
  */
 final class SlashBladeMelee implements MeleeStyle {
-
-    private static final Logger LOG = LoggerFactory.getLogger("numen-slashblade");
 
     @Override
     public boolean applies(NumenPlayer fighter, LivingEntity target) {
@@ -39,18 +41,65 @@ final class SlashBladeMelee implements MeleeStyle {
         InputDriver.lookAt(fighter, target.getEyePosition());
         fighter.setSprinting(false);
 
-        // 上一套连段打完才放 SA,否则推进连段——一套连招收尾一次 SA,这就是想要的节奏。
-        if (SlashBlade.trySlashArts(fighter, blade, target)) {
+        ComboRhythm rhythm = fighter.state(ComboRhythm.class, ComboRhythm::new);
+
+        // 上一招还没播满、而且这招还没结束 → 不切,等它播完(这一拍什么都不做,挥臂由招式自己的 tick 驱动)。
+        if (!rhythm.elapsed(fighter.tickCount) && SlashBlade.isBusy(fighter, blade)) {
             return true;
         }
 
-        if (SlashBlade.advanceCombo(fighter, blade, target)) {
+        int step = rhythm.nextStep();
+        if (step % 4 == 3) {
+            // 轮完三个普通招,收尾放一次 SA,放完回到第 0 步重开一轮。
+            if (SlashBlade.trySlashArts(fighter, blade, target)) {
+                rhythm.reset();
+                return true;
+            }
+            // 放不出(断刀/封印/无附魔)——仍当作这一格用掉,避免每拍徒劳重试。
+            rhythm.reset();
+        }
+
+        // 切到下一个普通招:直接指定 combo,第一击当场打出,后续由 ticker 播完。
+        if (SlashBlade.advanceCombo(fighter, blade, target, rhythm.step())) {
             return true;
         }
 
-        // 兜底:连段推不动(极少),原版平A。
+        // 兜底:切不动(极少),原版平A。
         fighter.attack(target);
         fighter.swing(InteractionHand.MAIN_HAND);
         return true;
+    }
+
+    /**
+     * 一具身体自己的招式轮换节奏:当前步进 {@code step},上一次切招时的 {@code lastTick}。
+     * 每招最多播 {@link #PER_MOVE_TICKS} 拍;上一招既没播满、又还没结束时不换招。
+     */
+    static final class ComboRhythm {
+        /** 一招最多播这么久(拍)再允许换下一招。20 拍 = 1 秒,足够刀光/位移播完。 */
+        static final int PER_MOVE_TICKS = 20;
+
+        private int step;
+        private int lastTick;
+
+        /** 上一招是否已播满规定拍数。 */
+        boolean elapsed(int nowTick) {
+            return nowTick - lastTick >= PER_MOVE_TICKS;
+        }
+
+        /** 步进到下一招,并记住这一刻为「本招起点」。 */
+        int nextStep() {
+            return ++step;
+        }
+
+        /** 当前步进。 */
+        int step() {
+            return step;
+        }
+
+        /** 回到本轮起点,重新计时。 */
+        void reset() {
+            step = 0;
+            lastTick = -PER_MOVE_TICKS;
+        }
     }
 }
