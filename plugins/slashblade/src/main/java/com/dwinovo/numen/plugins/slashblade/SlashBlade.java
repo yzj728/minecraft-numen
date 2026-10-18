@@ -26,6 +26,7 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * 本插件对接拔刀剑(SlashBlade:Resharped)的那一面——<b>唯一</b>知道拔刀剑类型的地方。
@@ -161,8 +162,35 @@ public final class SlashBlade {
     // ==================== 连段流 ====================
 
     /**
-     * 放一次 SA——评价够放超SA,否则普通 SA。放完 doArts+updateComboSeq 后,对「判断斩类 SA」额外
-     * 直调 {@link JudgementCut} helper 立即补特效(见类注释)。
+     * 连段走到这些「可蓄力」档位时,普通 SA(非超SA)才放得出来。这是原版蓄力判定里的
+     * 「重招」档——COMBO_C、COMBO_A4/A5、COMBO_B7、挑空/空中下劈/疾走居合/晨星的尾段。
+     * 别的档位(起手 COMBO_A1、连段中间)硬放 SA 会打断正在播的连段,而 NONE/STANDBY(还没
+     * 起手)也不该放——那该先起手连段。照车万女仆 sbr_core 的 {@code CHARGE_COMBO}。
+     */
+    private static final Set<ComboState> CHARGE_COMBO = Set.of(
+            ComboStateRegistry.COMBO_C.get(),
+            ComboStateRegistry.COMBO_A4.get(),
+            ComboStateRegistry.COMBO_A5.get(),
+            ComboStateRegistry.COMBO_B7.get(),
+            ComboStateRegistry.COMBO_B_END2.get(),
+            ComboStateRegistry.AERIAL_RAVE_A3.get(),
+            ComboStateRegistry.AERIAL_RAVE_B4.get(),
+            ComboStateRegistry.UPPERSLASH.get(),
+            ComboStateRegistry.UPPERSLASH_JUMP.get(),
+            ComboStateRegistry.AERIAL_CLEAVE_LANDING.get(),
+            ComboStateRegistry.RAPID_SLASH_END.get(),
+            ComboStateRegistry.RISING_STAR.get());
+
+    /** 此刻连段是否停在可蓄力档位——这是连段流里放 SA 的唯一依据。 */
+    private static boolean isChargeable(ISlashBladeState state, LivingEntity entity) {
+        ResourceLocation cur = state.resolvCurrentComboState(entity);
+        ComboState current = ComboStateRegistry.REGISTRY.get().getValue(cur);
+        return current != null && CHARGE_COMBO.contains(current);
+    }
+
+    /**
+     * 放一次 SA——只有连段走到可蓄力档位才放,评价够放超SA,否则普通 SA。放完 doArts+updateComboSeq 后,
+     * 对「判断斩类 SA」额外直调 {@link JudgementCut} helper 立即补特效(见类注释)。
      */
     public static boolean trySlashArts(LivingEntity entity, ItemStack blade, LivingEntity target) {
         if (!isSlashBlade(blade)) {
@@ -174,6 +202,10 @@ public final class SlashBlade {
                 return false;
             }
             if (!SwordType.from(blade).contains(SwordType.ENCHANTED)) {
+                return false;
+            }
+            // 不在可蓄力档位就不放:其余时刻交给普通连段推进,连段走到这里再放——这才「穿插」。
+            if (!isChargeable(state, entity)) {
                 return false;
             }
             state.setTargetEntityId(target.getId());
