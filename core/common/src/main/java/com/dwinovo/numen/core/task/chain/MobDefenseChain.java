@@ -187,16 +187,17 @@ public final class MobDefenseChain implements Task, Reflex {
     // ---- 什么算危险 ----
 
     /**
-     * 身边<b>进入警戒半径</b>的威胁。
+     * 身边<b>进入警戒半径、且在视线内</b>的威胁。
      *
-     * <p><b>主动进攻</b>:只要敌对生物进了警戒半径(近战 {@link #MELEE_GUARD_RADIUS}、持远程 {@link #RANGED_GUARD_RADIUS}),
-     * 就算危险,<b>不要求它已经锁定她</b>。防守不是挑衅——但一只敌对生物凑到六格内,
-     * 无论它冲谁来,都该先下手。打了它的那只由它自己记 {@code lastHurtByMob},不在这里拉仇恨。
+     * <p><b>主动进攻</b>:只要敌对生物进了警戒半径(近战 {@link #MELEE_GUARD_RADIUS}、持远程 {@link #RANGED_GUARD_RADIUS})
+     * <b>且在她视线内</b>,就算危险,<b>不要求它已经锁定她</b>。防守不是挑衅——但一只敌对生物
+     * 凑到六格内,无论它冲谁来,都该先下手。打了它的那只由它自己记 {@code lastHurtByMob},不在这里拉仇恨。
+     *
+     * <p><b>视线是硬门槛</b>:隔着墙、卡在洞里的是打不到的,当危险去追只会对着墙空转。
+     * 它没进视线时不算,等她转到能看见的角度自然算上。
      *
      * <p>本能开打也要过权限层:一只有名字的敌对生物,没有主人点头就不是一场能打的仗
      * ——开了也是 attack 在局面里把它剔掉、当场收场、下一刻再开,循环打转。
-     *
-     * <p>模型自己派的 {@code attack} 已经认领的目标同样不算:那场仗有人管了。
      */
     private List<Mob> dangersNear(NumenPlayer companion) {
         double radius = guardRadius(companion);
@@ -204,6 +205,10 @@ public final class MobDefenseChain implements Task, Reflex {
         for (Mob m : Menace.hostilesAround(companion, SCAN_RADIUS)) {
             // 进警戒半径才管:再远就交给模型,这里不越权
             if (companion.distanceTo(m) > radius) {
+                continue;
+            }
+            // 看不见的够不着:隔着墙当它是危险,只会对着墙空转
+            if (!companion.hasLineOfSight(m)) {
                 continue;
             }
             // 本能开打也要过权限层:一只有名字的僵尸,没有主人点头就不是一场能打的仗
