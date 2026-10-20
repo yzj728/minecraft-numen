@@ -1,8 +1,10 @@
 package com.dwinovo.numen.plugins.slashblade;
 
+import mods.flammpfeil.slashblade.SlashBlade;
 import mods.flammpfeil.slashblade.capability.concentrationrank.CapabilityConcentrationRank;
 import mods.flammpfeil.slashblade.capability.concentrationrank.IConcentrationRank;
 import mods.flammpfeil.slashblade.capability.slashblade.ISlashBladeState;
+import mods.flammpfeil.slashblade.entity.EntityAbstractSummonedSword;
 import mods.flammpfeil.slashblade.item.ItemSlashBlade;
 import mods.flammpfeil.slashblade.item.SwordType;
 import mods.flammpfeil.slashblade.registry.ComboStateRegistry;
@@ -11,8 +13,11 @@ import mods.flammpfeil.slashblade.slasharts.JudgementCut;
 import mods.flammpfeil.slashblade.slasharts.SlashArts;
 import mods.flammpfeil.slashblade.util.AttackManager;
 import mods.flammpfeil.slashblade.util.KnockBacks;
+import mods.flammpfeil.slashblade.util.VectorHelper;
 import net.minecraft.commands.arguments.EntityAnchorArgument;
+import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.sounds.SoundEvents;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.Entity;
@@ -20,6 +25,8 @@ import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.monster.Enemy;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.enchantment.Enchantments;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
@@ -31,18 +38,19 @@ import java.util.Objects;
 /**
  * 本插件对接拔刀剑(SlashBlade:Resharped)的那一面——<b>唯一</b>知道拔刀剑类型的地方。
  *
- * <h2>招式池 + 随机出招</h2>
+ * <h2>招式池 + 随机出招 + 瞬移接近 + 幻影剑</h2>
  * 拔刀剑自己的连段状态机是「帧数超时 + next/nextOfTimeout 网点」自动推进的,那套东西为真玩家的
- * 按键节奏设计,对假玩家(没有真实按键时序)完全不可控——普通连段 A1/A2 的下一段是 {@code buildFromFrame(5)}
- * 这种「几帧」超时,{@code resolvCurrentComboState} 每被读一次就把它们往前推,于是「挥两下就到底」。
- * 因此这里<b>不依赖网点推进</b>,改由 Numen 在若干招式之间<b>随机</b>挑,每招用 {@code updateComboSeq} 显式切入
- * (它内部 {@code clickAction} 是完整的第一击)。招式池覆盖地面连段、挑空、疾走居合、空中下劈、空中连段、晨星,
- * 空战与地面招混着出,不按固定次序。
+ * 按键节奏设计,对假玩家(没有真实按键时序)完全不可控。因此这里不依赖网点推进,改由 Numen 在若干招式之间
+ * 随机挑,每招用 {@code updateComboSeq} 显式切入。招式池覆盖地面连段、挑空、疾走居合、空中下劈、空中连段、晨星。
  *
- * <p>「判断斩」这类 SA 的<b>特效</b>在 {@code ComboState.tickAction} 的 {@code TimeLineTickAction.put(0, …)}
- * 里,靠 ticker 逐刻驱动,而假玩家的 ticker 时序对不齐,于是切过去「后退、收刀都出了,唯独中间召唤次元斩
- * 特效没出」。修法:放 SA 后,对「判断斩类 SA」<b>直接调原版 {@link JudgementCut} helper</b>立即生成次元斩实体——
- * 这和 {@code doSlash} 生成实体是同一条已验证可用的链路,不等 ticker。
+ * <p><b>瞬移接近</b>:目标够不着时,先瞬移到它身边——空中目标保持在它同高处走空中连段,地面目标落到它附近的地面。
+ *
+ * <p><b>幻影剑</b>:照车万女仆「真正的力量」{@code BASE_SUMMONED_SWORD}——直接生成 {@link EntityAbstractSummonedSword}
+ * 射向目标,遵守原版消耗(妖刀 + 力量箭附魔 + 骄傲之魂)。
+ *
+ * <p>「判断斩」这类 SA 的特效在 {@code ComboState.tickAction} 里靠 ticker 逐刻驱动,而假玩家的 ticker 时序对不齐,
+ * 于是切过去「后退、收刀都出了,唯独召唤次元斩特效没出」。修法:放 SA 后对「判断斩类 SA」直接调原版 {@link JudgementCut}
+ * helper 立即生成次元斩实体,不等 ticker。
  */
 public final class SlashBlade {
 
@@ -172,10 +180,7 @@ public final class SlashBlade {
 
     // ==================== 招式池 ====================
 
-    /**
-     * 普通招式池,随机抽一个(不含 SA;SA 由调用方另按概率决定)。
-     * 地面连段、挑空、疾走居合、空中下劈、空中连段、晨星——空战与地面招混搭,不按固定次序。
-     */
+    /** 普通招式池,随机抽一个(不含 SA;SA 由调用方另按概率决定)。 */
     private static ResourceLocation randomMove(LivingEntity entity, RandomSource rng) {
         int r = rng.nextInt(6);
         return switch (r) {
@@ -188,11 +193,11 @@ public final class SlashBlade {
         };
     }
 
-    /** 近战够不着的距离阈值:超过它,先疾走居合(瞬移前冲)接近,而不是原地空挥。 */
+    /** 近战够不着的距离阈值:超过它,先瞬移接近,而不是原地空挥。 */
     private static final double RUSH_THRESHOLD = 5.0;
 
     /**
-     * 随机切入一个普通招式。若目标在近战够到距离之外,优先疾走居合(瞬移前冲)接近。
+     * 随机切入一个普通招式。目标够不着时先瞬移到它身边(空中→空中连段,地面→落脚点)。
      *
      * @return false = 这一拍没切(刀不是拔刀剑),调用方走兜底。
      */
@@ -203,7 +208,11 @@ public final class SlashBlade {
         entity.lookAt(EntityAnchorArgument.Anchor.FEET, target.position());
         ResourceLocation loc;
         if (entity.distanceTo(target) > RUSH_THRESHOLD) {
-            loc = ComboStateRegistry.RAPID_SLASH.getId();   // 远了先冲刺接近
+            // 远了先瞬移贴上去
+            if (!teleportToTarget(entity, blade, target)) {
+                return false;
+            }
+            loc = ComboStateRegistry.RAPID_SLASH.getId();
         } else {
             loc = randomMove(entity, rng);
         }
@@ -215,8 +224,69 @@ public final class SlashBlade {
     }
 
     /**
+     * 瞬移到目标身边,随后打空中/地面连段。
+     *
+     * <p><b>目标在空中</b>(飞行、被挑空、未落地)→ 瞬移到它同高处,走空中连段({@code AERIAL_RAVE_A1});
+     * <b>目标在地面</b> → 从它脚下往下找落脚点,瞬移过去(不落进虚空、不卡进方块),走地面连段。
+     *
+     * @return 是否真的瞬移了(fasle = 找不到安全的落脚点,别瞬移)
+     */
+    public static boolean teleportToTarget(LivingEntity entity, ItemStack blade, LivingEntity target) {
+        if (!isSlashBlade(blade)) {
+            return false;
+        }
+        entity.lookAt(EntityAnchorArgument.Anchor.FEET, target.position());
+        if (!target.onGround() && !target.isInWater()) {
+            // 空中敌人:瞬移到它身边同高处,留给空中连段
+            entity.teleportTo(target.getX(), target.getY(), target.getZ());
+            entity.setDeltaMovement(Vec3.ZERO);
+            entity.fallDistance = 0.0f;
+            blade.getCapability(ItemSlashBlade.BLADESTATE)
+                    .ifPresent(state -> state.updateComboSeq(entity, ComboStateRegistry.AERIAL_RAVE_A1.getId()));
+            entity.swing(InteractionHand.MAIN_HAND);
+            return true;
+        }
+        // 地面目标:找它附近能站住的落脚点(从上往下扫,第一格能站住就落)
+        BlockPos landing = findLanding(entity.level(), target.blockPosition());
+        if (landing == null) {
+            return false;   // 找不到安全落脚点,不瞬移
+        }
+        entity.teleportTo(landing.getX() + 0.5, landing.getY(), landing.getZ() + 0.5);
+        entity.setDeltaMovement(Vec3.ZERO);
+        entity.fallDistance = 0.0f;
+        return true;
+    }
+
+    /**
+     * 从 {@code center} 往下/原地找一格「身上和脚上都是空气」的落脚点,找不到返回 null。
+     * 简单可靠:向下扫 8 格,找到第一个「下面实心、上面两格空」的 y。
+     */
+    private static BlockPos findLanding(Level level, BlockPos center) {
+        for (int dy = 0; dy <= 8; dy++) {
+            BlockPos at = center.above(dy);
+            BlockPos below = at.below();
+            if (level.getBlockState(at).isAir()
+                    && level.getBlockState(at.above()).isAir()
+                    && !level.getBlockState(below).isAir()) {
+                return at;
+            }
+        }
+        // 原地(目标脚下)本身是空气就落原地
+        for (int dy = 0; dy >= -8; dy--) {
+            BlockPos at = center.above(dy);
+            BlockPos below = at.below();
+            if (level.getBlockState(at).isAir()
+                    && level.getBlockState(at.above()).isAir()
+                    && !level.getBlockState(below).isAir()) {
+                return at;
+            }
+        }
+        return null;
+    }
+
+    /**
      * 放一次 SA。评价够放超SA(SSS),否则普通 SA——评价自然涨跌,不再锁死。
-     * 放完 doArts+updateComboSeq 后,对「判断斩类 SA」额外直调 {@link JudgementCut} helper 立即补特效(见类注释)。
+     * 对「判断斩类 SA」额外直调 {@link JudgementCut} helper 立即补特效。
      */
     public static boolean trySlashArts(LivingEntity entity, ItemStack blade, LivingEntity target) {
         if (!isSlashBlade(blade)) {
@@ -240,7 +310,6 @@ public final class SlashBlade {
             }
             state.updateComboSeq(entity, comboLoc);
             entity.swing(InteractionHand.MAIN_HAND);
-            // 判断斩类 SA:补立即特效,不等 ticker(ticker 时序对不齐会漏掉「召唤次元斩」那一击)。
             patchJudgementCutArt(entity, blade, sup);
             return true;
         }).orElse(false);
@@ -250,13 +319,60 @@ public final class SlashBlade {
     private static void patchJudgementCutArt(LivingEntity entity, ItemStack blade, boolean sup) {
         String key = artKey(blade);
         if (key == null || !key.endsWith("judgement_cut")) {
-            return;   // 非判断斩类 SA,不补(它们或自带 clickAction,或非本修复范围)
+            return;
         }
         if (sup) {
             JudgementCut.doJudgementCutSuper(entity);
         } else {
             JudgementCut.doJudgementCut(entity);
         }
+    }
+
+    /**
+     * 发一发幻影剑射向目标。照车万女仆「真正的力量」{@code BASE_SUMMONED_SWORD}。
+     *
+     * <p><b>遵守原版消耗</b>:妖刀(BEWITCHED)、带力量箭附魔(POWER_ARROWS)、骄傲之魂够扣——
+     * 任一不满足就不发(返回 false),退回普通挥击。这不白嫖资源。
+     */
+    public static boolean summonSword(LivingEntity entity, ItemStack blade, LivingEntity target) {
+        if (!isSlashBlade(blade) || target == null || !target.isAlive()) {
+            return false;
+        }
+        if (!SwordType.from(blade).contains(SwordType.BEWITCHED)) {
+            return false;   // 妖刀才放得出幻影剑
+        }
+        if (blade.getEnchantmentLevel(Enchantments.POWER_ARROWS) <= 0) {
+            return false;   // 力量箭附魔决定幻影剑伤害来源
+        }
+        return blade.getCapability(ItemSlashBlade.BLADESTATE).map(state -> {
+            if (state.isBroken() || state.isSealed()) {
+                return false;
+            }
+            if (state.getProudSoulCount() < 1) {
+                return false;   // 骄傲之魂是幻影剑的消耗
+            }
+            state.setProudSoulCount(state.getProudSoulCount() - 1);
+
+            Level world = entity.level();
+            int powerLevel = blade.getEnchantmentLevel(Enchantments.POWER_ARROWS);
+            Vec3 targetPos = new Vec3(target.getX(), target.getY() + target.getEyeHeight() * 0.5, target.getZ());
+
+            EntityAbstractSummonedSword sword = new EntityAbstractSummonedSword(
+                    SlashBlade.RegistryEvents.SummonedSword, world);
+            Vec3 pos = entity.getEyePosition(1.0f)
+                    .add(VectorHelper.getVectorForRotation(0.0f, entity.getViewYRot(0) + 90)
+                            .scale(world.random.nextDouble() > 0.5 ? 1 : -1));
+            sword.setPos(pos.x, pos.y, pos.z);
+            sword.setDamage(powerLevel);
+            sword.setOwner(entity);
+            sword.setColor(state.getColorCode());
+            sword.setRoll(entity.getRandom().nextFloat() * 360.0f);
+            Vec3 dir = targetPos.subtract(pos).normalize();
+            sword.shoot(dir.x, dir.y, dir.z, 3.0f, 0.0f);
+            world.addFreshEntity(sword);
+            entity.playSound(SoundEvents.CHORUS_FRUIT_TELEPORT, 0.2F, 1.45F);
+            return true;
+        }).orElse(false);
     }
 
     /** 此刻连段是否还没播完(当前档位的下一段不是 none,说明这招还有后续、正在播)。 */
