@@ -1,6 +1,5 @@
 package com.dwinovo.numen.plugins.slashblade;
 
-import mods.flammpfeil.slashblade.SlashBlade;
 import mods.flammpfeil.slashblade.capability.concentrationrank.CapabilityConcentrationRank;
 import mods.flammpfeil.slashblade.capability.concentrationrank.IConcentrationRank;
 import mods.flammpfeil.slashblade.capability.slashblade.ISlashBladeState;
@@ -358,7 +357,7 @@ public final class SlashBlade {
             Vec3 targetPos = new Vec3(target.getX(), target.getY() + target.getEyeHeight() * 0.5, target.getZ());
 
             EntityAbstractSummonedSword sword = new EntityAbstractSummonedSword(
-                    SlashBlade.RegistryEvents.SummonedSword, world);
+                    mods.flammpfeil.slashblade.SlashBlade.RegistryEvents.SummonedSword, world);
             Vec3 pos = entity.getEyePosition(1.0f)
                     .add(VectorHelper.getVectorForRotation(0.0f, entity.getViewYRot(0) + 90)
                             .scale(world.random.nextDouble() > 0.5 ? 1 : -1));
