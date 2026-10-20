@@ -19,6 +19,7 @@ import com.dwinovo.numen.core.FailureType;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.phys.Vec3;
 
 import java.util.List;
 
@@ -32,12 +33,10 @@ import java.util.List;
  * 它自己就醒过来。这跟原版 {@code Goal.canUse()} 是同一个道理——<b>休眠不是失败</b>,不发结果、
  * 不腾槽、不惊动模型。到没到只看目标,这里不另拿距离判"差不多到了";离主人多远只决定要不要起步。
  *
- * <h2>够不着就报出去</h2>
- * 跟着走从不动世界(出厂路线规格,不挖不放,没有开关),于是"没有路"多半不是暂时的:隔着断崖、
- * 在屋里、差几格高——退避多少次都一样。那就以失败收场,把原因交给模型,它决定先
- * {@code numen.move.to} 一条开路、换个办法、或者告诉主人。一个明确的失败原因不能攥在手里
- * 站着空算。主人飞在半空时跟的是他脚下能站的地方({@link #anchor}),一般够得着;真够不着
- * 也照样报。派下来那一刻就够不着的,受理之前就判({@link #preparation}),当场回、不受理。
+ * <h2>够不着就瞬移</h2>
+ * 跟的目标(主人、或点名的那只)离她远到难以走不到时(<b>直线距离超过 {@link #TELEPORT_DISTANCE}</b>,或寻路判
+ * NO_PATH/BOXED_IN),先<br>瞬移</b>到它附近的落脚点——不卡进方块、不落进虚空。瞬移成功就视为跟上;
+ * 没有落脚点可去才照老样子报「跟不上」,把原因交给模型。
  *
  * <h2>目标没了,主人和别人不一样</h2>
  * <b>主人下线是暂时的</b>——他会回来,所以休眠等着,到点为止。而点名跟的
@@ -47,9 +46,6 @@ import java.util.List;
  * <p><b>{@code nav.tick()} 的返回值一个都不能丢</b>:{@link Trip} 收场之后就稳定地是那个结局,
  * 不接住就是她永久定在原地而 {@code task status} 照说"执行中"——主人完全看不出她卡住了。
  * 这里接住的方式就是把它变成任务的结果。
- *
- * <p><b>目标跟着挪</b>:他走出上次定下的落脚点两格外,就把新目标交给在走的这一趟({@link Trip#retarget}),
- * 在走的路还算数就照走,不算数才重搜——挪多远才值得换在这里定。
  */
 public final class FollowCompanionTask extends AbstractCompanionTask<FollowTaskRecord> {
 
@@ -63,6 +59,9 @@ public final class FollowCompanionTask extends AbstractCompanionTask<FollowTaskR
 
     /** 他挪出上次的落脚点这么远(格)才把新目标交给在走的这一趟。 */
     private static final double RETARGET_DISTANCE = 2.0;
+
+    /** 跟不上了、直线距离又超过这么远,就瞬移送过去,而不是走断一条又一条的路。32 格:走路 30 秒起步,瞬移更干脆。 */
+    private static final double TELEPORT_DISTANCE = 32.0;
 
     /** 受理之前的准备规划到的那条路:第一趟照它走;没有、或已经用过为 null。 */
     private Route seed;
@@ -80,22 +79,14 @@ public final class FollowCompanionTask extends AbstractCompanionTask<FollowTaskR
         }
         Entity target = target(companion);
         if (target == null) {
-            // 点名的目标没了:要放它跑一刻才收得了尾(canRun 返 false 的任务不会 tick,
-            // 也就永远报不出去)。跟的是主人就单纯睡着等他回来。
             return r.target != null;
         }
         if (moving) {
-            // 在走的这一趟到没到,只看它的目标
             return true;
         }
-        // 迟滞:走出 keepWithin + margin 才起步——一跟到就起步会让她在临界距离上一步一停地抖
         return companion.position().distanceTo(target.position()) > r.keepWithin + RESUME_MARGIN;
     }
 
-    /**
-     * 受理之前:要跟的人此刻离她远到要起步时,一次只搜不走地规划过去的路——按同一份只走不改的规格走不到,就是开工后第一趟会
-     * 报的那句"跟不上",当场回,不受理;走得到的那条路是第一趟的开头({@link Trip#prepared})。就在身边、主人不在线,当场就绪。
-     */
     @Override
     protected Preparation preparation() {
         Entity target = target(player);
@@ -151,7 +142,7 @@ public final class FollowCompanionTask extends AbstractCompanionTask<FollowTaskR
         Entity target = target(player);
         if (target == null) {
             if (r.target == null) {
-                return TaskState.RUNNING;   // 主人下线:canRun 已经挡住了,这里只是防御
+                return TaskState.RUNNING;
             }
             stopNav();
             fail("the entity you were following is gone (killed, or it left the loaded area)",
@@ -160,9 +151,7 @@ public final class FollowCompanionTask extends AbstractCompanionTask<FollowTaskR
         }
         BlockPos anchor = anchor(target);
         if (nav == null) {
-            // 只走不改;跟不上的时候回执照实说要改几格才过得去
             heading = anchor;
-            // 受理之前规划好的那条只用在第一趟
             nav = Trip.prepared(player, goal(anchor), TERRAIN, seed, anchor);
             seed = null;
         } else if (anchor.distSqr(heading) > RETARGET_DISTANCE * RETARGET_DISTANCE) {
@@ -177,24 +166,40 @@ public final class FollowCompanionTask extends AbstractCompanionTask<FollowTaskR
                 moving = false;
             }
             case FAILED -> {
-                // 够不着就是这件活的结果:原因与清单交给模型,别攥着站在原地空算
+                stopNav();
+                // 跟不上了:先试瞬移送过去,成了就当作跟上;没落脚点才照老样子报。
+                if (player.position().distanceTo(target.position()) > TELEPORT_DISTANCE
+                        && teleportToAnchor(target, anchor)) {
+                    moving = false;
+                    return TaskState.RUNNING;
+                }
                 String why = nav.failReason();
                 FailureType type = nav.failType();
-                stopNav();
                 fail("can't keep up: " + why, type);
                 return TaskState.FAILED;
             }
         }
-        // 到点之前不返终态;只有够不着和目标没了才提前收场。
         return TaskState.RUNNING;
     }
 
     /**
-     * 跟着谁。没点名就是主人;点名了就按 UUID 现查——每次都查,因为它随时可能死掉或者
-     * 走出加载范围,而那两件事对我们是同一个答案:不在了。
-     *
-     * <p>不同维度天然落进 null:{@code ServerLevel.getEntity} 只认自己这一层。
+     * 瞬移到跟的落脚点:目标那一列里身体待得住的格子。成功返回 true;那一列待不住(悬在虚空)返回 false。
      */
+    private boolean teleportToAnchor(Entity target, BlockPos anchor) {
+        BlockPos landing = Terrain.of(player).settle(target.blockPosition());
+        if (landing == null || landing.getY() < player.level().getMinBuildHeight()) {
+            return false;
+        }
+        player.teleportTo(landing.getX() + 0.5, landing.getY(), landing.getZ() + 0.5);
+        player.setDeltaMovement(Vec3.ZERO);
+        player.fallDistance = 0.0f;
+        com.dwinovo.numen.event.NumenEvents.serverMessage(player,
+                "太远/走不到,瞬移到了目标附近 (" + landing.getX() + ", " + landing.getY() + ", " + landing.getZ() + ")。",
+                false, 0, 0);
+        return true;
+    }
+
+    /** 跟着谁。没点名就是主人;点名了就按 UUID 现查。 */
     private Entity target(NumenPlayer companion) {
         if (r.target == null) {
             var owner = companion.resolveOwnerPlayer();
@@ -209,22 +214,15 @@ public final class FollowCompanionTask extends AbstractCompanionTask<FollowTaskR
         return Goals.within(Goals.at(anchor), 0, r.keepWithin);
     }
 
-    /** 跟随的路线规格:只走不改,没有开关。 */
     private static final RouteSpec TERRAIN = RouteSpec.defaults();
 
-    /**
-     * 跟到哪一格:他所在那一列里身体待得住的地方({@link Terrain#settle})——他站着就是他脚下,悬空(飞行、跳跃、本来就会飞)
-     * 时是他下方的地面。那一列都待不住(悬在虚空上)就还是他那一格:那里够不着,于是照实报,而不是假装找到了。
-     */
     private BlockPos anchor(Entity target) {
         return Terrain.of(player).settle(target.blockPosition());
     }
 
-    /** {@code numen.move.follow} 交回的值。 */
     @com.dwinovo.numen.sdk.Doc("Where a follow ended.")
-    public record Followed(@com.dwinovo.numen.sdk.Doc("Where you stand at the end.") net.minecraft.world.phys.Vec3 pos) {}
+    public record Followed(@com.dwinovo.numen.sdk.Doc("Where you stand at the end.") Vec3 pos) {}
 
-    /** 收尾时她站在哪。 */
     @Override
     protected Followed value() {
         return new Followed(player.position());
@@ -232,7 +230,6 @@ public final class FollowCompanionTask extends AbstractCompanionTask<FollowTaskR
 
     @Override
     protected String successMessage() {
-        // 到点走到 SUCCESS;被换掉、被叫停走的是 cancelledMessage。
         return "followed " + r.who() + " for " + r.forTicks / 20 + " s";
     }
 }
